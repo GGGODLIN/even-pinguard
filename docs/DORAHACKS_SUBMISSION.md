@@ -30,9 +30,19 @@ Organizers running multiple Telegram groups during launches or Demo Days face tw
 
 ---
 
+## Bounded Matching & Conflict Rule Set
+
+- **Question matching:** `minisearch` BM25+ matches against canonical facts seeded from [faq-seed.json](/faq-seed.json) and their example questions, using ASCII lowercasing and CJK 2-gram tokenization. Non-text Telegram updates (`!msg.text`) are ignored by message matching.
+- **Date conflicts:** `chrono-node` uses the English and Chinese (EN + ZH) casual parsers and compares explicit `year`, `month`, `day`, and `weekday` components. A same-day, time-only edit with no date or numeric unit change does not trigger a date conflict in v1.
+- **Numeric conflicts:** The comparator handles integers and decimals with units including `%`, USD (`$`, `US$`, `USD`), TWD (`NT$`, `TWD`, `元`), and capacity (`seat(s)`, `spot(s)`, `place(s)`, `人`, `位`). It also detects positional swaps within a unit, such as `Room A 80 seats, Room B 120 seats` becoming `Room A 120 seats, Room B 80 seats`.
+
+These are bounded matching rules, not general multilingual NLP.
+
+---
+
 ## Live End-to-End Evidence (2026-11-23)
 
-- **Automated & Blind Contract Verification**: `83/83` Vitest tests passing (`tsc --noEmit` 0 errors, `vite build` clean, `evenhub pack` 38,224-byte `.ehpk` with 0 warnings) + `78/78` independent black-box blind verification scenarios across Seam 1 (17/17 + 40-step patrol), Seam 2 (36/36 + 43-step patrol), and Voice/Companion (25/25), 0 counterexamples.
+- **Automated & Blind Contract Verification**: `82/82` Vitest tests passing (`tsc --noEmit` 0 errors, `vite build` clean, `evenhub pack` 38,224-byte `.ehpk` with 0 warnings) + `78/78` independent black-box blind verification scenarios across Seam 1 (17/17 + 40-step patrol), Seam 2 (36/36 + 43-step patrol), and Voice/Companion (25/25), 0 counterexamples.
 - **Live Telegram + Even Hub Simulator 0.9.5 Receipts**:
   - Preflight verified `@pinguard_g2_demo_bot` (`can_pin_messages: true`) across Community A (`-1004343200115`), Community B (`-1004463230101`), and Ops (`-1003924897141`).
   - Cross-group questions triggered `READY` on the G2 lens; conflicting admin update locked into `HOLD_CONFLICT` (`HTTP 409` on execute); real simulator `click -> up` escalated Ops Inline Keyboard card (with live Groq STT note); clicking `Confirm New` unlocked `READY [CONFIRMED]` (v4); real simulator `click -> up` delivered & silently pinned `message_id: 5` (`-1004343200115`) and `message_id: 3` (`-1004463230101`), clearing the lens to idle.

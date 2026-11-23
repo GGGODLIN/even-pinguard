@@ -222,11 +222,9 @@ async function waitForCallback(
 export async function runLiveGateProbe(
   config: Config,
   transport: TelegramPreflightTransport,
-  options: { waitCallbackTimeoutSec?: number } = {},
+  { waitCallbackTimeoutSec = 60 }: { waitCallbackTimeoutSec?: number } = {},
 ) {
-  const { waitCallbackTimeoutSec } = options;
-  if (waitCallbackTimeoutSec !== undefined &&
-      (!Number.isInteger(waitCallbackTimeoutSec) || waitCallbackTimeoutSec < 1 || waitCallbackTimeoutSec > 2_147_483)) {
+  if (!Number.isInteger(waitCallbackTimeoutSec) || waitCallbackTimeoutSec < 1 || waitCallbackTimeoutSec > 2_147_483) {
     throw new Error("Callback timeout must be a positive integer in seconds within the Node timer range");
   }
   const [chatId] = config.communityChatIds;
@@ -246,9 +244,7 @@ export async function runLiveGateProbe(
     "PinGuard Gate test: press the button to verify Telegram callbacks.", {
       reply_markup: { inline_keyboard: [[{ text: "Acknowledge Gate test", callback_data: callbackData }]] },
     });
-  const callback = waitCallbackTimeoutSec === undefined
-    ? null
-    : await waitForCallback(config, transport, callbackCard.messageId, waitCallbackTimeoutSec);
+  const callback = await waitForCallback(config, transport, callbackCard.messageId, waitCallbackTimeoutSec);
   return {
     preflight,
     delivery: { ...sent, pinned: true, disableNotification: true },

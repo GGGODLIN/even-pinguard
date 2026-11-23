@@ -32,7 +32,7 @@ When an authorized admin posts a conflicting date or numeric value newer than th
 
 ### 4. Causal No-Loop Unlock → `READY [CONFIRMED]` on Lens
 
-Clicking **`Confirm New`** (from an authorized admin) updates the canonical revision and resolved timestamp so earlier conflicting messages never re-trigger `HOLD_CONFLICT`. Any prior armed state on the glasses is invalidated on version change, requiring a fresh `TAP → SWIPE UP` on the updated text:
+Clicking **`Confirm New`** (from an authorized admin) creates a canonical revision whose effective timestamp advances to the conflict timestamp, so messages at or before that timestamp cannot re-trigger `HOLD_CONFLICT`. Any prior armed state on the glasses is invalidated on version change, requiring a fresh `TAP → SWIPE UP` on the updated text:
 
 ![Even G2 Confirmed READY lens card](https://raw.githubusercontent.com/GGGODLIN/even-pinguard/main/docs/screenshots/04-glasses-confirmed.png)
 
@@ -65,6 +65,14 @@ Executing `TAP → SWIPE UP` broadcasts and silently pins (`disable_notification
 
 ---
 
+## Bounded Matching & Conflict Rule Set
+
+- **Question matching:** `minisearch` BM25+ matches against canonical facts seeded from [faq-seed.json](/faq-seed.json) and their example questions, using ASCII lowercasing and CJK 2-gram tokenization. Non-text Telegram updates (`!msg.text`) are ignored by message matching.
+- **Date conflicts:** `chrono-node` uses the English and Chinese (EN + ZH) casual parsers and compares explicit `year`, `month`, `day`, and `weekday` components. A same-day, time-only edit with no date or numeric unit change does not trigger a date conflict in v1.
+- **Numeric conflicts:** The comparator handles integers and decimals with units including `%`, USD (`$`, `US$`, `USD`), TWD (`NT$`, `TWD`, `元`), and capacity (`seat(s)`, `spot(s)`, `place(s)`, `人`, `位`). It also detects positional swaps within a unit, such as `Room A 80 seats, Room B 120 seats` becoming `Room A 120 seats, Room B 80 seats`.
+
+These are bounded matching rules, not general multilingual NLP.
+
 ## Quick Start
 
 ### Prerequisites
@@ -94,7 +102,7 @@ npx evenhub-simulator http://127.0.0.1:3456
 ### Verification & `.ehpk` Packaging
 ```bash
 npm run typecheck   # tsc --noEmit (0 errors)
-npm test            # Vitest suite (83/83 passing across 4 suites)
+npm test            # Vitest suite
 npx evenhub pack app.json ./dist -o pinguard.ehpk --sdk-ver 0.0.16 --json
 ```
 
@@ -115,7 +123,7 @@ Grounded directly in issues encountered while building and live-testing PinGuard
 1. **Even Hub SDK — Background State Persistence API (`setBackgroundState` / `onBackgroundRestore`)**: Even Hub documentation references background restoration, but `@evenrealities/even_hub_sdk@0.0.16` only emits `FOREGROUND_ENTER_EVENT (4)` without built-in state persistence. Shipping real `setBackgroundState` / `onBackgroundRestore` hooks would let lightweight glasses apps avoid full HTTP re-hydration on every resume while still invalidating stale armed states cleanly.
 2. **Even Hub SDK — Explicit Non-Zero Event Normalization for Touchpad Click**: Verified live on `evenhub-simulator@0.9.5`: a single click arrives as `{ sysEvent: { eventSource: 1 } }` with `eventType` omitted (`undefined` due to protobuf3 zero-value omission for `CLICK_EVENT = 0`), whereas swipes arrive on `textEvent` with `eventType: 1/2`. Normalizing omitted `CLICK_EVENT` to `0` inside the JS SDK (or assigning non-zero wire values) would eliminate subtle click-vs-empty-envelope bugs across apps.
 3. **Even Hub SDK — Text Layout / Overflow Measurement Callback**: Because G2 text containers enforce a 999-byte limit with no scrollbar and `textContainerUpgrade` returns only a boolean, apps cannot tell whether a dynamic message wrapped cleanly within the 576×288 viewport. Returning `{ ok, truncated, lineCount }` (or exposing a pure text-measure helper matching firmware LVGL font metrics) would allow exact fit checks instead of conservative static heuristics.
-4. **Telegram Bot API — Pin Enumeration & Pre-Join Context (`getPinnedMessages`)**: Bots cannot read pre-join history or list multiple pinned announcements in a group, forcing organizers to bootstrap canonical facts externally via `/seed` or JSON files. Adding a read-only `getPinnedMessages` endpoint for admin bots would allow zero-config canonical fact discovery upon joining an existing community group.
+4. **Telegram Bot API — Pin Enumeration & Pre-Join Context (`getPinnedMessages`)**: Bots cannot read pre-join history or list multiple pinned announcements in a group, forcing organizers to bootstrap canonical facts from [faq-seed.json](/faq-seed.json). Adding a read-only `getPinnedMessages` endpoint for admin bots would allow zero-config canonical fact discovery upon joining an existing community group.
 5. **Telegram Bot API — Idempotency Keys & Atomic Silent Pin on `sendMessage`**: Network timeouts during `sendMessage` leave bots in `SEND_UNKNOWN` where retrying risks duplicate group spam, and splitting `sendMessage` + `pinChatMessage` creates partial-failure states (`PIN_FAILED`). Supporting a client-supplied `idempotency_key` and an optional `pin_silently: true` parameter on `sendMessage` would make multi-group organizer broadcasts atomic and retry-safe.
 
 ---

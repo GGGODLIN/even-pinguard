@@ -153,15 +153,6 @@ describe("live Gate probe", () => {
     expect(transport.pinChatMessage).toHaveBeenCalledTimes(0);
   });
 
-  it("returns send and pin receipts without waiting for the card when no wait was requested", async () => {
-    const transport = fakeTransport();
-    const receipt = await runLiveGateProbe(config, transport);
-    expect(receipt.delivery).toEqual({ chatId: firstCommunity, messageId: 41, pinned: true, disableNotification: true });
-    expect(receipt.callbackCard).toEqual({ chatId: opsChat, messageId: 87 });
-    expect(receipt.callback).toBeNull();
-    expect(transport.getUpdates.mock.calls).toEqual([[{ limit: 1, timeout: 0 }, undefined]]);
-  });
-
   it("does not retry if a Telegram 409 arrives during callback polling after startup", async () => {
     const transport = fakeTransport();
     transport.getUpdates.mockResolvedValueOnce([]).mockRejectedValueOnce(
@@ -235,10 +226,17 @@ describe("Gate redaction", () => {
   it("redacts untrusted strings in otherwise successful probe receipts", async () => {
     const transport = fakeTransport();
     transport.getMe.mockResolvedValue({ id: "123456789", username: fakeToken });
+    transport.getUpdates.mockResolvedValueOnce([]).mockResolvedValueOnce([
+      { update_id: 700, callback_query: {
+        id: fakeToken, from: { id: callbackUserId }, data: "pinguard:gate:ack",
+        message: { chat: { id: opsChat }, message_id: 87 },
+      } },
+    ]);
     const receipt = await runLiveGateProbe(config, transport);
     expect(JSON.stringify(receipt).includes(fakeToken)).toBe(false);
     expect(receipt.preflight.username.includes("[REDACTED]")).toBe(true);
     expect(receipt.preflight.botId).toBe("123456789");
     expect(receipt.delivery.messageId).toBe(41);
+    expect(receipt.callback).toMatchObject({ callbackQueryId: "[REDACTED]", acknowledged: true });
   });
 });

@@ -135,10 +135,6 @@ export class PinGuardEngine {
     const inOps = msg.chatId === this.options.opsChatId;
     if (!inCommunity && !inOps && msg.chatId !== this.options.announceChatId) return;
     const authorized = this.adminUserIds.has(msg.fromUserId ?? "");
-    if (/^\/seed(?:@\w+)?(?:\s|$)/i.test(text)) {
-      if (inOps && authorized) this.seedFacts(this.parseSeedCommand(text), msg.timestamp);
-      return;
-    }
     const question = inCommunity && isQuestion(text);
     if (!question && !authorized) return;
 
@@ -158,7 +154,7 @@ export class PinGuardEngine {
   }
 
   private detectConflict(fact: FactRow, msg: IncomingTelegramMessage, text: string): boolean {
-    if (msg.timestamp <= Math.max(fact.effective_at, fact.resolved_through_ts)) return false;
+    if (msg.timestamp <= fact.effective_at) return false;
     if (fact.conflict_timestamp !== null && msg.timestamp <= fact.conflict_timestamp) {
       if (msg.timestamp < fact.conflict_timestamp) return false;
       if (fact.conflict_chat_id === msg.chatId && msg.messageId <= fact.conflict_message_id!) return true;
@@ -196,15 +192,6 @@ export class PinGuardEngine {
     } else {
       this.db.prepare("INSERT INTO clusters (cluster_id, fact_key, status, groups_json) VALUES (?, ?, ?, ?)")
         .run(randomUUID(), fact.fact_key, "COLLECTING", JSON.stringify(groups));
-    }
-  }
-
-  private parseSeedCommand(text: string): unknown {
-    try {
-      // /seed accepts the same JSON object or array as the FAQ file and HTTP route.
-      return JSON.parse(text.replace(/^\/seed(?:@\w+)?\s*/i, "")) as unknown;
-    } catch {
-      throw new PinGuardError(400, "Provide seed facts as JSON after /seed");
     }
   }
 
@@ -307,10 +294,10 @@ export class PinGuardEngine {
         .run(fact.fact_key, revision, text, effectiveAt);
       this.db.prepare(`
         UPDATE facts SET active_revision = ?, version = version + 1, lock_state = 'CLEAR', confirmed = 1,
-          resolved_through_ts = ?, conflict_id = NULL, conflict_text = NULL, conflict_chat_id = NULL,
+          conflict_id = NULL, conflict_text = NULL, conflict_chat_id = NULL,
           conflict_message_id = NULL, conflict_timestamp = NULL, conflict_card_sent = 0
         WHERE fact_key = ?
-      `).run(revision, effectiveAt, fact.fact_key);
+      `).run(revision, fact.fact_key);
     });
   }
 

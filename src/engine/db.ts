@@ -10,7 +10,6 @@ export interface FactRow {
   version: number;
   lock_state: LockState;
   confirmed: number;
-  resolved_through_ts: number;
   conflict_id: string | null;
   conflict_text: string | null;
   conflict_chat_id: string | null;
@@ -44,7 +43,6 @@ export function openPinGuardDatabase(path: string): DatabaseSync {
         version INTEGER NOT NULL DEFAULT 1,
         lock_state TEXT NOT NULL DEFAULT 'CLEAR' CHECK (lock_state IN ('CLEAR', 'HOLD_CONFLICT', 'AWAITING_CONFIRM')),
         confirmed INTEGER NOT NULL DEFAULT 0,
-        resolved_through_ts INTEGER NOT NULL DEFAULT 0,
         conflict_id TEXT UNIQUE,
         conflict_text TEXT,
         conflict_chat_id TEXT,
@@ -101,6 +99,8 @@ export function transaction<T>(db: DatabaseSync, operation: () => T): T {
 }
 
 export const selectFacts = `
-  SELECT f.*, r.revision, r.text, r.effective_at
+  SELECT f.fact_key, f.questions, f.version, f.lock_state, f.confirmed, f.conflict_id,
+    f.conflict_text, f.conflict_chat_id, f.conflict_message_id, f.conflict_timestamp,
+    r.revision, r.text, r.effective_at
   FROM facts f JOIN fact_revisions r ON r.fact_key = f.fact_key AND r.revision = f.active_revision
 `;

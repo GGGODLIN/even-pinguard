@@ -7,18 +7,11 @@ export const maxVoicePcmBytes = sampleRateHz * maxVoiceSeconds * sampleBytes;
 export const maxVoiceWavBytes = headerBytes + maxVoicePcmBytes;
 export const maxVoiceMs = maxVoiceSeconds * 1_000;
 
-export function encodePcm16ToWav(
-  chunks: readonly Uint8Array[], sampleRate = sampleRateHz, maxSeconds = maxVoiceSeconds,
-): Uint8Array<ArrayBuffer> {
-  const maxBytes = Math.floor(maxSeconds * sampleRate) * sampleBytes;
-  if (!Number.isSafeInteger(sampleRate) || sampleRate < 1 || sampleRate * sampleBytes > 0xffffffff ||
-      !Number.isSafeInteger(maxBytes) || maxSeconds < 0 || maxBytes + 36 > 0xffffffff) {
-    throw new RangeError("Invalid PCM sample rate or duration");
-  }
+export function encodePcm16ToWav(chunks: readonly Uint8Array[]): Uint8Array<ArrayBuffer> {
   let size = 0;
   for (const chunk of chunks) {
-    size = Math.min(maxBytes, size + chunk.length);
-    if (size === maxBytes) break;
+    size = Math.min(maxVoicePcmBytes, size + chunk.length);
+    if (size === maxVoicePcmBytes) break;
   }
   size -= size % sampleBytes;
 
@@ -31,8 +24,8 @@ export function encodePcm16ToWav(
   header.setUint32(16, 16, true);
   header.setUint16(20, 1, true);
   header.setUint16(22, 1, true);
-  header.setUint32(24, sampleRate, true);
-  header.setUint32(28, sampleRate * sampleBytes, true);
+  header.setUint32(24, sampleRateHz, true);
+  header.setUint32(28, sampleRateHz * sampleBytes, true);
   header.setUint16(32, sampleBytes, true);
   header.setUint16(34, 16, true);
   header.setUint32(36, 0x64617461); // data

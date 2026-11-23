@@ -13,9 +13,9 @@ function loadLocalEnv(): void {
 
 async function main(args: readonly string[]): Promise<void> {
   const [mode = "--preflight-only", timeout] = args;
-  if (!((mode === "--preflight-only" || mode === "--send-probe") && args.length <= 1) &&
-      !(mode === "--wait-callback" && args.length === 2 && /^\d+$/.test(timeout))) {
-    throw new Error("Usage: tsx scripts/gate-probe.ts [--preflight-only | --send-probe | --wait-callback <timeoutSec>]");
+  if (!(mode === "--preflight-only" && args.length <= 1) &&
+      !(mode === "--wait-callback" && (args.length === 1 || (args.length === 2 && /^\d+$/.test(timeout))))) {
+    throw new Error("Usage: tsx scripts/gate-probe.ts [--preflight-only | --wait-callback [timeoutSec]]");
   }
 
   loadLocalEnv();
@@ -27,7 +27,7 @@ async function main(args: readonly string[]): Promise<void> {
   const receipt = mode === "--preflight-only"
     ? await runTelegramPreflight(config, transport)
     : await runLiveGateProbe(config, transport, {
-      waitCallbackTimeoutSec: mode === "--wait-callback" ? Number(timeout) : undefined,
+      waitCallbackTimeoutSec: timeout === undefined ? undefined : Number(timeout),
     });
   console.log(JSON.stringify(receipt, null, 2));
 }

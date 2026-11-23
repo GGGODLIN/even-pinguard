@@ -14,10 +14,9 @@ export function parseEvenHubEvent(raw: unknown): GlassesEvent | null {
 
   if (raw.listEvent != null || raw.audioEvent != null || raw.menuItemClickEvent != null ||
       (raw.sysEvent != null && (!system || raw.textEvent != null))) return null;
-  const type = system ? systemType : textType;
-  if (type === EventType.SCROLL_TOP_EVENT) return "SWIPE_UP";
-  if (type === EventType.SCROLL_BOTTOM_EVENT) return "SWIPE_DOWN";
-  if (system && (type === EventType.CLICK_EVENT || (type === undefined &&
+  if (textType === EventType.SCROLL_TOP_EVENT) return "SWIPE_UP";
+  if (textType === EventType.SCROLL_BOTTOM_EVENT) return "SWIPE_DOWN";
+  if (system && (systemType === EventType.CLICK_EVENT || (systemType === undefined &&
       // The SDK normalizes unknown enum values to undefined too; only an omitted value is a tap.
       pickLoose(raw.jsonData, "eventType") === undefined))) return "CLICK";
   return null;

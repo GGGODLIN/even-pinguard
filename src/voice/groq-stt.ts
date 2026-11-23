@@ -1,5 +1,3 @@
-export { encodePcm16ToWav } from "./wav.js";
-
 export interface SttPort {
   transcribe(wav: Uint8Array): Promise<string | null>;
 }

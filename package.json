@@ -13,7 +13,7 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "gate:preflight": "tsx scripts/gate-probe.ts --preflight-only",
-    "gate:probe": "tsx scripts/gate-probe.ts --send-probe"
+    "gate:probe": "tsx scripts/gate-probe.ts --wait-callback"
   },
   "dependencies": {
     "chrono-node": "^2.10.3",

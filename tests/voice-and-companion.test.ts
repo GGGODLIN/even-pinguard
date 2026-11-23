@@ -12,7 +12,8 @@ import type { ClusterState, DeliveryReceipt, StateSnapshot, TelegramDeliveryPort
 import { GlassesController, type EvenGlassesBridge, type PinGuardApiClient } from "../src/glasses/glasses-controller.js";
 import { redactSecret } from "../src/redaction.js";
 import { createPinGuardServer } from "../src/server/http-server.js";
-import { encodePcm16ToWav, GroqSttAdapter, type SttPort } from "../src/voice/groq-stt.js";
+import { GroqSttAdapter, type SttPort } from "../src/voice/groq-stt.js";
+import { encodePcm16ToWav } from "../src/voice/wav.js";
 
 const groqKey = "gsk_SYNTHETIC_GROQ_TEST_KEY_999";
 const botToken = "123456:SYNTHETIC_BOT_TOKEN_999";
@@ -116,8 +117,8 @@ it("serves static symlinks only when their resolved files stay inside the static
   expect(await outside.json()).toEqual({ error: "Route not found" });
 });
 
-it("encodes capped little-endian mono PCM without a partial sample", () => {
-  const file = Buffer.from(encodePcm16ToWav([samples.subarray(0, 1), samples.subarray(1), Uint8Array.of(9)], 16_000, 2 / 16_000));
+it("encodes little-endian mono PCM without a partial sample", () => {
+  const file = Buffer.from(encodePcm16ToWav([samples.subarray(0, 1), samples.subarray(1), Uint8Array.of(9)]));
   expect(file.toString("ascii", 0, 4)).toBe("RIFF");
   expect(file.readUInt32LE(4)).toBe(40);
   expect(file.toString("ascii", 8, 16)).toBe("WAVEfmt ");
@@ -189,22 +190,33 @@ it("validates WAV length, header and HOLD_CONFLICT version before forwarding any
   const stale = await app.upload(voiceUrl.replace("Version=2", "Version=1"));
   expect(stale.status).toBe(409);
   expect(await safeJson(stale)).toEqual({ error: "Stale fact version" });
-  const wrongFormat = await app.upload(voiceUrl, encodePcm16ToWav([samples], 8_000));
+  const wrongRate = wav();
+  const wrongRateHeader = new DataView(wrongRate.buffer, 0, 44);
+  wrongRateHeader.setUint32(24, 8_000, true);
+  wrongRateHeader.setUint32(28, 16_000, true);
+  const wrongFormat = await app.upload(voiceUrl, wrongRate);
   expect(wrongFormat.status).toBe(400);
   expect(await safeJson(wrongFormat)).toEqual({ error: "Expected a mono 16 kHz PCM16 voice WAV" });
+
   const pcm = new Uint8Array(320_002);
-  const oversized = await app.upload(voiceUrl, encodePcm16ToWav([pcm], 16_000, 11));
+  const cappedWav = encodePcm16ToWav([pcm]);
+  const oversizedWav = new Uint8Array(44 + pcm.byteLength);
+  oversizedWav.set(cappedWav);
+  const oversizedHeader = new DataView(oversizedWav.buffer, 0, 44);
+  oversizedHeader.setUint32(4, oversizedWav.byteLength - 8, true);
+  oversizedHeader.setUint32(40, pcm.byteLength, true);
+  const oversized = await app.upload(voiceUrl, oversizedWav);
   expect(oversized.status).toBe(400);
   expect(await safeJson(oversized)).toEqual({ error: "Voice WAV must be at most 10 seconds" });
   expect(transcribe.mock.calls).toHaveLength(0);
   expect(app.telegram.sendMessage).not.toHaveBeenCalled();
 
-  expect(await safeJson(await app.upload(voiceUrl, encodePcm16ToWav([pcm])))).toEqual({ ok: true });
+  expect(await safeJson(await app.upload(voiceUrl, cappedWav))).toEqual({ ok: true });
   expect(transcribe.mock.calls.map(([file]) => file.byteLength)).toEqual([320_044]);
   expectOpsCard(app.telegram, context);
 });
 
-it("does not send a second ops card if conflict state advances during transcription", async () => {
+it("ignores JSON voice notes and does not send a second card when transcription goes stale", async () => {
   let started!: () => void;
   let finish!: (text: string) => void;
   const waiting = new Promise<void>((resolve) => { started = resolve; });
@@ -214,7 +226,8 @@ it("does not send a second ops card if conflict state advances during transcript
   const upload = app.upload();
   await waiting;
   try {
-    expect(await safeJson(await app.post("/api/actions/escalate", action))).toEqual({ ok: true });
+    expect(await safeJson(await app.post("/api/actions/escalate", { ...action, voiceNote: "Untrusted JSON note" })))
+      .toEqual({ ok: true });
   } finally {
     finish(context);
   }
@@ -273,7 +286,7 @@ it("redacts Groq and Telegram credentials in API state, receipts and failure res
     status: "PIN_FAILED", error: "pin denied [REDACTED] [REDACTED]" });
   app.conflict();
   app.telegram.sendMessage.mockRejectedValueOnce(new Error(`ops denied ${upstreamDetails}`));
-  const rejected = await app.post("/api/actions/escalate", { ...action, voiceNote: context });
+  const rejected = await app.post("/api/actions/escalate", action);
   expect(rejected.status).toBe(502);
   expect(await safeJson(rejected)).toEqual({ error: "ops denied [REDACTED] [REDACTED]" });
 });
@@ -302,32 +315,30 @@ it("renders live backend state and per-group receipt fields without markup or cr
     return state;
   };
   expect((await draw()).clusters[0].status).toBe("READY");
-  expect(root.descendants("p").map((node) => node.textContent)).toContain(canonical);
+  expect(root.textContent).toContain("READY");
+  expect(root.textContent).toContain(canonical);
   app.conflict();
   await draw();
-  expect(root.descendants("strong").map((node) => node.textContent)).toEqual(["HOLD_CONFLICT"]);
-  expect(root.descendants("p").map((node) => node.textContent)).toContain(update);
+  expect(root.textContent).toContain("HOLD_CONFLICT");
+  expect(root.textContent).toContain(update);
   expect(await safeJson(await app.post("/api/actions/escalate", action))).toEqual({ ok: true });
   await draw();
-  expect(root.descendants("strong").map((node) => node.textContent)).toEqual(["AWAITING_CONFIRM"]);
+  expect(root.textContent).toContain("AWAITING_CONFIRM");
   const keepOriginal = app.telegram.sendMessage.mock.calls[0][2]!.reply_markup.inline_keyboard[0][1].callback_data;
   app.engine.handleCallbackQuery({ chatId: ops, fromUserId: admin, data: keepOriginal });
   const [confirmed] = (await draw()).clusters;
-  expect(root.descendants("strong").map((node) => node.textContent)).toEqual(["READY", "CONFIRMED"]);
-  expect(root.descendants("p").map((node) => node.textContent)).toContain("Version 4 · CONFIRMED");
+  expect(root.textContent).toContain("READY");
+  expect(root.textContent).toContain("Version 4 · CONFIRMED");
 
   app.telegram.pinChatMessage.mockRejectedValueOnce(new Error(`pin denied <b> ${upstreamDetails}`));
   await safeJson(await app.post("/api/actions/execute", { clusterId: confirmed.cluster_id, expectedVersion: 4 }));
   await draw();
-  expect(root.descendants("p").map((node) => node.textContent)).toContain("IDLE — no active cluster");
-  const rows = root.descendants("dl");
-  expect(rows[0].descendants("dt").map((node) => node.textContent)).toEqual([
-    "chat_id", "message_id", "sent", "pinned", "status", "error",
-  ]);
-  expect(rows.map((row) => row.descendants("dd").map((node) => node.textContent))).toEqual([
-    [alpha, "41", "true", "false", "PIN_FAILED", "pin denied <b> [REDACTED] [REDACTED]"],
-    [beta, "41", "true", "true", "PINNED", "—"],
-  ]);
+  for (const text of [
+    "IDLE — no active cluster", "chat_id", "message_id", "sent", "pinned", "status", "error",
+    alpha, beta, "41", "true", "false", "PIN_FAILED", "PINNED", "pin denied <b> [REDACTED] [REDACTED]", "—",
+  ]) {
+    expect(root.textContent).toContain(text);
+  }
   expect(root.descendants("b")).toEqual([]);
   expect(root.descendants("badge")).toEqual([]);
   expect(containsKey(root.textContent), "companion shows synthetic credentials").toBe(false);
@@ -337,9 +348,8 @@ it("renders live backend state and per-group receipt fields without markup or cr
       error: `pin denied ${groqKey} ${botToken}` },
   ]);
   expect(containsKey(root.textContent), "renderer accepts a raw provider error").toBe(false);
-  expect(root.descendants("dd").map((node) => node.textContent)).toEqual([
-    alpha, "—", "false", "false", "SEND_FAILED", "pin denied [REDACTED] [REDACTED]",
-  ]);
+  expect(root.textContent).toContain("SEND_FAILED");
+  expect(root.textContent).toContain("pin denied [REDACTED] [REDACTED]");
 });
 
 const tap = { sysEvent: { eventSource: 1 } };

@@ -1,6 +1,7 @@
 import {
   DeviceConnectType,
   DeviceStatus,
+  OsEventTypeList as EventType,
   StartUpPageCreateResult,
   evenHubEventFromJson,
   type EvenHubEvent,
@@ -392,7 +393,16 @@ describe("GlassesController through the SDK and backend boundaries", () => {
     glasses.emit({ sysEvent: { eventType: 0 } });
     await advance();
     expect(glasses.lens()).toBe(armedText);
-    glasses.emit({ sysEvent: { eventType: 1 } });
+    glasses.emit({ sysEvent: { eventType: EventType.SCROLL_TOP_EVENT } });
+    await advance();
+    expect(glasses.api.executeCluster).not.toHaveBeenCalled();
+    expect(glasses.lens()).toBe(armedText);
+
+    glasses.emit({ sysEvent: { eventType: EventType.SCROLL_BOTTOM_EVENT } });
+    await advance();
+    expect(glasses.lens()).toBe(armedText);
+
+    glasses.emit({ textEvent: { eventType: EventType.SCROLL_TOP_EVENT } });
     await advance();
     expect(glasses.api.executeCluster.mock.calls).toEqual([[payload]]);
   });

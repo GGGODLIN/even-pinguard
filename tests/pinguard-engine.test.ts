@@ -204,13 +204,16 @@ it("processes queued updates with poll headroom and drains an in-flight execute 
     expect(process.exitCode).toBe(1);
     expect(signals.map((signal) => process.listenerCount(signal))).toEqual(listenerCounts);
     await expect(localFetch(`${base}/api/state`)).rejects.toThrow("fetch failed");
-    const db = new DatabaseSync(dbPath, { readOnly: true });
+    const reopened = new PinGuardEngine({
+      dbPath, communityChatIds: [alpha, beta], opsChatId: ops, announceChatId: announce, adminUserIds: [admin],
+      telegram: { sendMessage: vi.fn(), pinChatMessage: vi.fn() },
+    });
     try {
-      expect(db.prepare("SELECT chat_id, message_id, status FROM deliveries ORDER BY rowid").all()).toEqual([
-        { chat_id: alpha, message_id: 41, status: "PINNED" }, { chat_id: beta, message_id: 41, status: "PINNED" },
-      ]);
+      expect(reopened.getReceipts()).toEqual([alpha, beta].map((chat_id) => ({
+        action_id: cluster.cluster_id, chat_id, message_id: 41, status: "PINNED", sent: true, pinned: true, error: null,
+      })));
     } finally {
-      db.close();
+      reopened.close();
     }
   } finally {
     stopPolling.resolve();
@@ -229,9 +232,8 @@ it("processes queued updates with poll headroom and drains an in-flight execute 
 
 describe("FAQ seeding and clustering", () => {
   it("waits for three separate matching questions in one group", async () => {
-    const { engine, get, post } = await fixture();
-    const seeded = await post("/api/seed", [seed]);
-    expect(await seeded.json()).toEqual({ inserted: 1 });
+    const { engine, get } = await fixture();
+    expect(engine.seedFacts([seed])).toBe(1);
     ingest(engine);
     ingest(engine);
     ingest(engine, { messageId: 2, text: "When does registration close?" });
@@ -272,16 +274,21 @@ describe("FAQ seeding and clustering", () => {
     }]);
   });
 
-  it("honors authorized ops /seed, and never seeds or writes back to announce", async () => {
-    const { engine, telegram } = await fixture();
-    const text = `/seed ${JSON.stringify({ ...seed, effectiveAt: undefined })}`;
+  it("seeds from the FAQ file, not Telegram or HTTP, and keeps announce read-only", async () => {
+    const { dir, engine, post, telegram } = await fixture();
+    const fileSeed = { ...seed, effectiveAt: seedTime + 1 };
+    const text = `/seed ${JSON.stringify(fileSeed)}`;
     ingest(engine, { chatId: announce, fromUserId: admin, text });
     ingest(engine, { chatId: ops, fromUserId: guest, text });
     ingest(engine, { fromUserId: admin, text });
+    ingest(engine, { chatId: ops, fromUserId: admin, text });
     ingest(engine, { messageId: 2 });
     ingest(engine, { chatId: beta, messageId: 2 });
+    expect((await post("/api/seed", [fileSeed])).status).toBe(404);
     expect(engine.getState()).toEqual({ facts: [], clusters: [] });
-    ingest(engine, { chatId: ops, fromUserId: admin, text });
+    const seedPath = join(dir, "faq-seed.json");
+    await writeFile(seedPath, JSON.stringify(fileSeed));
+    await expect(engine.loadFaqSeedFile(seedPath)).resolves.toBe(1);
     expect(engine.getState().facts).toMatchObject([
       { fact_key: "registration", text: draft, revision: 1, version: 1, effective_at: seedTime + 1 },
     ]);
@@ -559,7 +566,7 @@ describe("bounded per-group delivery", () => {
     const secretUrl = `https://api.telegram.org/bot${token}/sendMessage`;
     const leaks = (text: string) => text.includes(token) || text.includes(encodeURIComponent(token)) || text.includes(secretUrl);
     expect(leaks(secretUrl) && leaks(encodeURIComponent(token))).toBe(true);
-    expect((await post("/api/seed", { ...seed, text: `${draft} ${token}` })).status).toBe(200);
+    expect(engine.seedFacts({ ...seed, text: `${draft} ${token}` })).toBe(1);
     ingest(engine);
     ingest(engine, { chatId: beta });
     conflict(engine, { text: `${update} ${encodeURIComponent(token)}` });

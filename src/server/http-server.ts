@@ -57,13 +57,8 @@ function readAction(input: unknown, target: "clusterId" | "factKey"): { id: stri
 
 async function readEscalation(req: IncomingMessage, engine: PinGuardEngine, stt: SttPort) {
   if (mediaType(req) !== "audio/wav") {
-    const input = await readJson(req);
-    const { id: factKey, expectedVersion } = readAction(input, "factKey");
-    const voiceNote = (input as { voiceNote?: unknown }).voiceNote;
-    if (voiceNote !== undefined && typeof voiceNote !== "string") {
-      throw new PinGuardError(400, "Expected voiceNote to be a string");
-    }
-    return { factKey, expectedVersion, voiceNote };
+    const { id: factKey, expectedVersion } = readAction(await readJson(req), "factKey");
+    return { factKey, expectedVersion };
   }
 
   const query = new URLSearchParams(req.url?.split("?")[1]);
@@ -154,13 +149,10 @@ export function createPinGuardServer(
       }
       if (req.method === "POST" && path === "/api/actions/escalate") {
         const { voiceNote, ...action } = await readEscalation(req, engine, transcriber);
-        await engine.escalateConflict({
-          ...action, voiceNote: voiceNote === undefined ? undefined : redactSecret(voiceNote, outputSecrets),
-        });
+        await engine.escalateConflict(voiceNote === undefined
+          ? action
+          : { ...action, voiceNote: redactSecret(voiceNote, outputSecrets) });
         return reply(res, 200, { ok: true });
-      }
-      if (req.method === "POST" && path === "/api/seed") {
-        return reply(res, 200, { inserted: engine.seedFacts(await readJson(req)) });
       }
       if (req.method === "GET" && path && await tryServeStatic(res, path)) return;
       return reply(res, 404, { error: "Route not found" });
