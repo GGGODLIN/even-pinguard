@@ -1,0 +1,21 @@
+[
+  {
+    "factKey": "demo_day_venue",
+    "text": "Demo Day is Nov 26 at 14:00 in Hall B.",
+    "questions": [
+      "Where is Demo Day?",
+      "What time does Demo Day start?",
+      "Which hall is Demo Day in?",
+      "Demo Day 幾點在哪裡？"
+    ]
+  },
+  {
+    "factKey": "submission_deadline",
+    "text": "Submission deadline is Nov 29 at 19:59 UTC on DoraHacks.",
+    "questions": [
+      "When is the submission deadline?",
+      "Where do we submit our project?",
+      "截稿時間是什麼時候？"
+    ]
+  }
+]

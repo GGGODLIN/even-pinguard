@@ -9,6 +9,7 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
+    "start": "tsx src/server/main.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "gate:preflight": "tsx scripts/gate-probe.ts --preflight-only",

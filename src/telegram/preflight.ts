@@ -13,8 +13,18 @@ interface PollOptions {
   allowed_updates?: ["message", "channel_post", "callback_query"];
 }
 
-interface TelegramUpdate {
+export interface TelegramUpdateMessage {
+  chat: { id: string };
+  message_id: number;
+  from?: { id: string; is_bot?: boolean };
+  date: number;
+  text?: string;
+}
+
+export interface TelegramUpdate {
   update_id: number;
+  message?: TelegramUpdateMessage;
+  channel_post?: TelegramUpdateMessage;
   callback_query?: {
     id: string;
     from: { id: string };
@@ -66,8 +76,18 @@ export function createTelegramTransport(token: string, fetchTelegram = globalThi
     async getUpdates(options, signal) {
       // grammY's web build uses native abort signals, but its declarations re-export Node's polyfill type.
       const updates = await api.getUpdates(options, signal as unknown as Parameters<Api["getUpdates"]>[1]);
-      return updates.map(({ update_id, callback_query: query }) => ({
+      const mapMsg = (msg: { chat: { id: number }; message_id: number; from?: { id: number; is_bot?: boolean }; date: number; text?: string } | undefined): TelegramUpdateMessage | undefined =>
+        msg && {
+          chat: { id: String(msg.chat.id) },
+          message_id: msg.message_id,
+          from: msg.from && { id: String(msg.from.id), is_bot: msg.from.is_bot },
+          date: msg.date,
+          text: msg.text,
+        };
+      return updates.map(({ update_id, message, channel_post, callback_query: query }) => ({
         update_id,
+        message: mapMsg(message),
+        channel_post: mapMsg(channel_post),
         callback_query: query && {
           id: query.id,
           from: { id: String(query.from.id) },
@@ -83,7 +103,7 @@ export function createTelegramTransport(token: string, fetchTelegram = globalThi
   };
 }
 
-function isPollingConflict(error: unknown): boolean {
+export function isPollingConflict(error: unknown): boolean {
   const failure: unknown = error instanceof HttpError ? error.error : error;
   return typeof failure === "object" && failure !== null && (
     ("error_code" in failure && failure.error_code === 409) ||

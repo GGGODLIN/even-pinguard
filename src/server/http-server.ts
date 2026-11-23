@@ -1,4 +1,6 @@
+import { readFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { extname, resolve, sep } from "node:path";
 import type { PinGuardEngine } from "../engine/pinguard-engine.js";
 import { PinGuardError } from "../engine/types.js";
 import { redactSecret, sanitizeError } from "../redaction.js";
@@ -85,10 +87,47 @@ async function readEscalation(req: IncomingMessage, engine: PinGuardEngine, stt:
   return { factKey, expectedVersion, voiceNote };
 }
 
-export function createPinGuardServer(engine: PinGuardEngine, secrets: readonly string[] = [], stt?: SttPort) {
+const STATIC_MIME: Record<string, string> = {
+  ".html": "text/html; charset=utf-8",
+  ".js": "application/javascript; charset=utf-8",
+  ".css": "text/css; charset=utf-8",
+  ".json": "application/json; charset=utf-8",
+  ".svg": "image/svg+xml",
+  ".png": "image/png",
+};
+
+export function createPinGuardServer(
+  engine: PinGuardEngine,
+  secrets: readonly string[] = [],
+  stt?: SttPort,
+  staticDir?: string,
+) {
   const groqKey = process.env.GROQ_API_KEY?.trim();
   const outputSecrets = [...secrets, groqKey ?? "", process.env.TELEGRAM_BOT_TOKEN?.trim() ?? ""];
   const transcriber = stt ?? new GroqSttAdapter(groqKey);
+  const resolvedStaticDir = staticDir ? resolve(staticDir) : undefined;
+
+  async function tryServeStatic(res: ServerResponse, rawPath: string): Promise<boolean> {
+    if (!resolvedStaticDir) return false;
+    let decoded: string;
+    try {
+      decoded = decodeURIComponent(rawPath);
+    } catch {
+      return false;
+    }
+    const rel = decoded === "/" ? "index.html" : decoded.replace(/^\/+/, "");
+    const target = resolve(resolvedStaticDir, rel);
+    if (target !== resolvedStaticDir && !target.startsWith(`${resolvedStaticDir}${sep}`)) return false;
+    try {
+      const body = await readFile(target);
+      const mime = STATIC_MIME[extname(target)] ?? "application/octet-stream";
+      res.writeHead(200, { "content-type": mime, "cache-control": "no-store", "x-content-type-options": "nosniff" });
+      res.end(body);
+      return true;
+    } catch {
+      return false;
+    }
+  }
 
   function reply(res: ServerResponse, status: number, body: unknown): void {
     const json = JSON.stringify(body, (_key, value: unknown) =>
@@ -121,6 +160,7 @@ export function createPinGuardServer(engine: PinGuardEngine, secrets: readonly s
       if (req.method === "POST" && path === "/api/seed") {
         return reply(res, 200, { inserted: engine.seedFacts(await readJson(req)) });
       }
+      if (req.method === "GET" && path && await tryServeStatic(res, path)) return;
       return reply(res, 404, { error: "Route not found" });
     } catch (error) {
       req.resume();
