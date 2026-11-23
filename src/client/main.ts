@@ -1,49 +1,32 @@
-import {
-  CreateStartUpPageContainer,
-  OsEventTypeList,
-  StartUpPageCreateResult,
-  TextContainerProperty,
-  waitForEvenAppBridge,
-} from "@evenrealities/even_hub_sdk";
+import { waitForEvenAppBridge } from "@evenrealities/even_hub_sdk";
+import type { StateSnapshot } from "../engine/types.js";
+import { GlassesController, type PinGuardApiClient } from "../glasses/glasses-controller.js";
 
-function report(entry: object): void {
-  console.log(JSON.stringify(entry));
-}
+const api: PinGuardApiClient = {
+  async getState() {
+    const response = await fetch("/api/state", { cache: "no-store" });
+    if (!response.ok) throw new Error(`PinGuard state request failed (${response.status})`);
+    return response.json() as Promise<StateSnapshot>;
+  },
+  async executeCluster(action) {
+    const response = await fetch("/api/actions/execute", {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(action),
+    });
+    if (!response.ok) throw new Error(`PinGuard execute request failed (${response.status})`);
+  },
+  async escalateConflict(action) {
+    const response = await fetch("/api/actions/escalate", {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(action),
+    });
+    if (!response.ok) throw new Error(`PinGuard escalation request failed (${response.status})`);
+  },
+};
 
 async function start(): Promise<void> {
   const bridge = await waitForEvenAppBridge();
-  const result = await bridge.createStartUpPageContainer(new CreateStartUpPageContainer({
-    containerTotalNum: 1,
-    textObject: [new TextContainerProperty({
-      xPosition: 0,
-      yPosition: 0,
-      width: 576,
-      height: 288,
-      paddingLength: 8,
-      containerID: 1,
-      containerName: "startup",
-      isEventCapture: 1,
-      content: "PinGuard\nEven Hub Gate\nTap or swipe to verify input",
-    })],
-  }));
-  report({ event: "createStartUpPageContainer", result });
-  if (result !== StartUpPageCreateResult.success) return;
-
-  const unsubscribe = bridge.onEvenHubEvent(({ sysEvent, textEvent }) => {
-    // Protobuf omits the zero-valued click enum in system envelopes.
-    const systemType = sysEvent && (sysEvent.eventType ?? OsEventTypeList.CLICK_EVENT);
-    const textType = textEvent?.eventType;
-    if (systemType === OsEventTypeList.CLICK_EVENT || textType === OsEventTypeList.CLICK_EVENT) {
-      report({ event: "tap" });
-    } else if (textType === OsEventTypeList.SCROLL_TOP_EVENT) {
-      report({ event: "swipe", direction: "up" });
-    } else if (textType === OsEventTypeList.SCROLL_BOTTOM_EVENT) {
-      report({ event: "swipe", direction: "down" });
-    }
-  });
-  window.addEventListener("beforeunload", unsubscribe, { once: true });
+  const controller = new GlassesController(bridge, api, { pollIntervalMs: 1000 });
+  window.addEventListener("beforeunload", () => controller.destroy(), { once: true });
+  await controller.start();
 }
 
-void start().catch((error: unknown) => {
-  report({ event: "bridge_error", error: error instanceof Error ? error.message : "Bridge failed" });
-});
+void start().catch(console.error);
