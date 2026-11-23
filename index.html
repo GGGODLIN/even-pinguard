@@ -3,12 +3,27 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>PinGuard</title>
+    <title>PinGuard Companion</title>
+    <style>
+      :root { color-scheme: dark; font-family: system-ui, sans-serif; color: #e2e8f0; background: #0f172a; }
+      body { margin: 0; }
+      main { max-width: 52rem; margin: 0 auto; padding: 1.5rem 1rem 3rem; overflow-wrap: anywhere; }
+      h1, article strong { color: #86efac; }
+      h1, h2, h3, h4 { line-height: 1.2; margin: 0 0 .6rem; }
+      h4 { font-size: .9rem; color: #cbd5e1; }
+      p { margin: .5rem 0 1rem; line-height: 1.5; white-space: pre-wrap; }
+      section { margin-top: 2rem; }
+      article { background: #1e293b; border: 1px solid #475569; border-radius: .6rem; padding: 1rem; margin-top: .75rem; }
+      article > :last-child { margin-bottom: 0; }
+      dl { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: .4rem 1rem; margin: 0; }
+      dt { color: #cbd5e1; }
+      dd { margin: 0; font-family: ui-monospace, monospace; }
+    </style>
   </head>
   <body>
     <main>
       <h1>PinGuard</h1>
-      <h2>Even Hub Gate</h2>
+      <div id="companion"></div>
     </main>
     <script type="module" src="/src/client/main.ts"></script>
   </body>

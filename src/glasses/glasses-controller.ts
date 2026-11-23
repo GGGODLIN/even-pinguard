@@ -1,20 +1,28 @@
-import { DeviceConnectType, type EvenAppBridge } from "@evenrealities/even_hub_sdk";
+import { AudioInputSource, DeviceConnectType, type EvenAppBridge, type EvenHubEvent } from "@evenrealities/even_hub_sdk";
 import type { ClusterState, StateSnapshot } from "../engine/types.js";
+import { encodePcm16ToWav, maxVoiceMs, maxVoicePcmBytes } from "../voice/wav.js";
 import { SerialBridgeScheduler } from "./bridge-scheduler.js";
 import { formatCard, idleText } from "./card-formatter.js";
 import { parseEvenHubEvent } from "./event-parser.js";
 
 export type EvenGlassesBridge = Pick<EvenAppBridge,
   "createStartUpPageContainer" | "textContainerUpgrade" | "shutDownPageContainer" |
-  "onEvenHubEvent" | "onDeviceStatusChanged">;
+  "onEvenHubEvent" | "onDeviceStatusChanged"> & Partial<Pick<EvenAppBridge, "audioControl">>;
 
 export interface PinGuardApiClient {
   getState(): Promise<StateSnapshot>;
   executeCluster(action: { clusterId: string; expectedVersion: number }): Promise<unknown>;
-  escalateConflict(action: { factKey: string; expectedVersion: number }): Promise<unknown>;
+  escalateConflict(action: { factKey: string; expectedVersion: number; wav?: Uint8Array<ArrayBuffer> }): Promise<unknown>;
 }
 
 type ArmedAction = { kind: "execute" | "escalate"; cluster: ClusterState };
+type VoiceCapture = {
+  chunks: Uint8Array[];
+  size: number;
+  recording: boolean;
+  timer?: ReturnType<typeof setTimeout>;
+  closed?: Promise<boolean>;
+};
 
 function sameCard(a: ClusterState | undefined, b: ClusterState | undefined): boolean {
   if (!a || !b) return a === b;
@@ -27,6 +35,8 @@ export class GlassesController {
   private readonly unsubscribe: (() => void)[] = [];
   private cluster?: ClusterState;
   private armed?: ArmedAction;
+  private voice?: VoiceCapture;
+  private armEpoch = 0;
   private started = false;
   private destroyed = false;
   private acting = false;
@@ -76,7 +86,7 @@ export class GlassesController {
   destroy(): void {
     if (this.destroyed) return;
     this.destroyed = true;
-    this.armed = undefined;
+    this.disarm();
     this.activeRead = undefined;
     clearInterval(this.pollTimer);
     this.scheduler.invalidateText();
@@ -106,15 +116,51 @@ export class GlassesController {
 
   private async rehydrate(): Promise<void> {
     if (this.destroyed) return;
+    this.disarm();
     this.scheduler.invalidateText();
     await Promise.all([this.updateCard(), this.refresh()]);
   }
 
   private updateCard(next?: ClusterState): Promise<void> {
     if (this.destroyed) return Promise.resolve();
-    if (!sameCard(this.cluster, next)) this.armed = undefined;
+    if (!sameCard(this.cluster, next)) this.disarm();
     this.cluster = next && { ...next };
     return this.render();
+  }
+
+  private disarm(): VoiceCapture | undefined {
+    this.armEpoch++;
+    this.armed = undefined;
+    const voice = this.voice;
+    this.voice = undefined;
+    if (voice) this.stopVoice(voice);
+    return voice;
+  }
+
+  private stopVoice(voice: VoiceCapture): void {
+    voice.recording = false;
+    clearTimeout(voice.timer);
+    voice.closed ??= this.scheduler.setAudio(false);
+  }
+
+  private async startVoice(): Promise<void> {
+    if (!this.bridge.audioControl) return;
+    const voice: VoiceCapture = { chunks: [], size: 0, recording: false };
+    this.voice = voice;
+    const opened = await this.scheduler.setAudio(true, () => this.voice === voice);
+    if (!opened || this.voice !== voice) return;
+    voice.recording = true;
+    voice.timer = setTimeout(() => this.stopVoice(voice), maxVoiceMs);
+  }
+
+  private captureAudio(audio: EvenHubEvent["audioEvent"]): void {
+    const voice = this.voice;
+    const pcm = audio?.audioPcm;
+    if (!voice?.recording || audio?.source === AudioInputSource.Phone || !(pcm instanceof Uint8Array) || !pcm.length) return;
+    const chunk = pcm.slice(0, maxVoicePcmBytes - voice.size);
+    voice.chunks.push(chunk);
+    voice.size += chunk.length;
+    if (voice.size >= maxVoicePcmBytes) this.stopVoice(voice);
   }
 
   private async render(): Promise<void> {
@@ -123,7 +169,7 @@ export class GlassesController {
     await this.scheduler.setText(this.acting ? idleText : formatCard(cluster, !!this.armed).text);
   }
 
-  private async handleEvent(raw: unknown): Promise<void> {
+  private async handleEvent(raw: EvenHubEvent): Promise<void> {
     if (this.destroyed) return;
     const event = parseEvenHubEvent(raw);
     if (event === "EXIT") return this.destroy();
@@ -134,9 +180,10 @@ export class GlassesController {
     if (this.armed) {
       if (event === "SWIPE_UP") return this.dispatch(this.armed);
       if (event === "CLICK" || event === "SWIPE_DOWN") {
-        this.armed = undefined;
+        this.disarm();
         return this.render();
       }
+      if (this.armed.kind === "escalate") this.captureAudio(raw?.audioEvent);
       return;
     }
     if (event !== "CLICK" || !this.cluster) return;
@@ -149,6 +196,7 @@ export class GlassesController {
       this.armed = { kind: "execute", cluster };
     } else if (cluster.status === "HOLD_CONFLICT" && cluster.lock_state === "HOLD_CONFLICT") {
       this.armed = { kind: "escalate", cluster };
+      this.run(this.startVoice());
     } else {
       return;
     }
@@ -156,13 +204,21 @@ export class GlassesController {
   }
 
   private async dispatch({ kind, cluster }: ArmedAction): Promise<void> {
-    this.armed = undefined;
+    const voice = this.disarm();
+    const epoch = this.armEpoch;
     this.acting = true;
     this.run(this.render());
     const { cluster_id: clusterId, fact_key: factKey, version: expectedVersion } = cluster;
     try {
-      if (kind === "execute") await this.api.executeCluster({ clusterId, expectedVersion });
-      else await this.api.escalateConflict({ factKey, expectedVersion });
+      if (kind === "execute") {
+        await this.api.executeCluster({ clusterId, expectedVersion });
+      } else {
+        if (voice) await voice.closed;
+        // A pending bridge call can outlive the arm epoch; do not upload a canceled recording.
+        if (epoch !== this.armEpoch) return;
+        const wav = voice && voice.size >= 2 ? encodePcm16ToWav(voice.chunks) : undefined;
+        await this.api.escalateConflict(wav ? { factKey, expectedVersion, wav } : { factKey, expectedVersion });
+      }
     } finally {
       this.acting = false;
       await this.rehydrate();
@@ -170,7 +226,7 @@ export class GlassesController {
   }
 
   private async requestExit(): Promise<void> {
-    this.armed = undefined;
+    this.disarm();
     this.closing++;
     try {
       await this.scheduler.shutdown();

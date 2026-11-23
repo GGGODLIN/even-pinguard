@@ -1,4 +1,5 @@
 import {
+  AudioInputSource,
   CreateStartUpPageContainer,
   StartUpPageCreateResult,
   TextContainerProperty,
@@ -81,6 +82,19 @@ export class SerialBridgeScheduler {
   private cancelText(): void {
     this.pending?.cancel();
     this.pending = undefined;
+  }
+
+  setAudio(open: boolean, stillArmed = () => true): Promise<boolean> {
+    return this.enqueue(async () => {
+      if (!this.bridge.audioControl || (open && !stillArmed())) return false;
+      try {
+        return open
+          ? await this.bridge.audioControl(true, AudioInputSource.Glasses)
+          : await this.bridge.audioControl(false);
+      } catch {
+        return false;
+      }
+    });
   }
 
   shutdown(): Promise<boolean> {
