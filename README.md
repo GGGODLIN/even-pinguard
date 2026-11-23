@@ -94,7 +94,7 @@ npx evenhub-simulator http://127.0.0.1:3456
 ### Verification & `.ehpk` Packaging
 ```bash
 npm run typecheck   # tsc --noEmit (0 errors)
-npm test            # Vitest suite (72/72 passing across 4 suites)
+npm test            # Vitest suite (83/83 passing across 4 suites)
 npx evenhub pack app.json ./dist -o pinguard.ehpk --sdk-ver 0.0.16 --json
 ```
 

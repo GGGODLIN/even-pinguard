@@ -1,4 +1,7 @@
 import { once } from "node:events";
+import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   AudioInputSource, DeviceConnectType, DeviceStatus, StartUpPageCreateResult, evenHubEventFromJson, type EvenHubEvent,
 } from "@evenrealities/even_hub_sdk";
@@ -39,7 +42,7 @@ async function safeJson(response: Response) {
   return JSON.parse(text);
 }
 
-async function fixture(stt?: SttPort, draft = canonical) {
+async function fixture(stt?: SttPort, draft = canonical, staticDir?: string) {
   const telegram = {
     sendMessage: vi.fn<TelegramDeliveryPort["sendMessage"]>(async (chatId) => ({ chat: { id: chatId }, message_id: 41 })),
     pinChatMessage: vi.fn<TelegramDeliveryPort["pinChatMessage"]>().mockResolvedValue(true),
@@ -53,7 +56,7 @@ async function fixture(stt?: SttPort, draft = canonical) {
   for (const chatId of [alpha, beta]) {
     engine.ingestMessage({ chatId, messageId: 1, timestamp: seedTime + 1, text: "When is the registration deadline?" });
   }
-  const server = createPinGuardServer(engine, [botToken, groqKey], stt);
+  const server = createPinGuardServer(engine, [botToken, groqKey], stt, staticDir);
   server.listen(0, "127.0.0.1");
   await once(server, "listening");
   cleanups.push(() => new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve())));
@@ -90,6 +93,27 @@ function expectOpsCard(telegram: Awaited<ReturnType<typeof fixture>>["telegram"]
 afterEach(async () => {
   for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
   vi.restoreAllMocks();
+});
+
+it("serves static symlinks only when their resolved files stay inside the static root", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "pinguard-static-"));
+  cleanups.push(() => rm(dir, { recursive: true, force: true }));
+  const root = join(dir, "dist");
+  const sibling = join(dir, "dist-sibling");
+  await mkdir(root);
+  await mkdir(sibling);
+  await writeFile(join(root, "index.html"), "Companion UI fixture");
+  await writeFile(join(sibling, "example.html"), "Sibling UI fixture");
+  await symlink(join(root, "index.html"), join(root, "inside.html"));
+  await symlink(join(sibling, "example.html"), join(root, "outside.html"));
+  const app = await fixture(undefined, canonical, root);
+
+  const inside = await app.get("/inside.html");
+  expect(inside.status).toBe(200);
+  expect(await inside.text()).toBe("Companion UI fixture");
+  const outside = await app.get("/outside.html");
+  expect(outside.status).toBe(404);
+  expect(await outside.json()).toEqual({ error: "Route not found" });
 });
 
 it("encodes capped little-endian mono PCM without a partial sample", () => {
@@ -330,7 +354,7 @@ const readyCluster: ClusterState = {
 const locked: ClusterState = { ...readyCluster, status: "HOLD_CONFLICT", lock_state: "HOLD_CONFLICT", version: 2 };
 const tick = () => vi.advanceTimersByTimeAsync(120);
 
-async function glasses(cluster = locked) {
+async function glasses(cluster = locked, onError?: (error: Error) => void) {
   let onEvent: (e: EvenHubEvent) => void = () => {};
   let onDeviceStatus: (status: DeviceStatus) => void = () => {};
   const audioControl = vi.fn<NonNullable<EvenGlassesBridge["audioControl"]>>().mockResolvedValue(true);
@@ -347,7 +371,7 @@ async function glasses(cluster = locked) {
     escalateConflict: vi.fn<PinGuardApiClient["escalateConflict"]>().mockResolvedValue(undefined),
     executeCluster: vi.fn<PinGuardApiClient["executeCluster"]>().mockResolvedValue(undefined),
   };
-  const controller = new GlassesController(bridge, api);
+  const controller = new GlassesController(bridge, api, { onError });
   const started = controller.start();
   await tick();
   await started;
@@ -385,6 +409,19 @@ describe("G2 scoped voice capture", () => {
     expect([...uploaded.subarray(44, 50)]).toEqual([1, 255, 2, 254, 23, 23]);
     expect(uploaded.at(-1)).toBe(23);
     expect(g2.api.executeCluster).not.toHaveBeenCalled();
+    g2.controller.destroy();
+  });
+
+  it.each([true, false])("retries a rejected microphone close once (retry succeeds: %s)", async (closesOnRetry) => {
+    const onError = vi.fn<(error: Error) => void>();
+    const g2 = await glasses(locked, onError);
+    g2.audioControl.mockResolvedValueOnce(true).mockResolvedValueOnce(false).mockResolvedValueOnce(closesOnRetry);
+    g2.emit(tap);
+    await tick();
+    g2.emit(tap);
+    await tick();
+    expect(g2.audioControl.mock.calls).toEqual([[true, AudioInputSource.Glasses], [false], [false]]);
+    expect(onError.mock.calls.map(([error]) => error.message)).toEqual(closesOnRetry ? [] : ["Failed to close glasses microphone"]);
     g2.controller.destroy();
   });
 

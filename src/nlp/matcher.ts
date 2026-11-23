@@ -102,6 +102,13 @@ export function valuesConflict(canonical: string, effectiveAt: number, candidate
   if (baseline.dates.length && incoming.dates.some((date) => !baseline.dates.some((old) =>
     componentsAgree(old, date, ["year", "month", "day", "weekday"])))) return true;
 
+  for (const kind of new Set(incoming.numbers.map((number) => number.kind))) {
+    const incomingForKind = incoming.numbers.filter((number) => number.kind === kind);
+    const baselineForKind = baseline.numbers.filter((number) => number.kind === kind);
+    if (incomingForKind.length > 1 && incomingForKind.length === baselineForKind.length &&
+        incomingForKind.some((number, index) => number.value !== baselineForKind[index].value)) return true;
+  }
+
   return incoming.numbers.some((number) => {
     const comparable = baseline.numbers.filter((old) => old.kind === number.kind ||
       (baseline.numbers.length === 1 && incoming.numbers.length === 1 && (!old.kind || !number.kind)));

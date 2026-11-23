@@ -2,6 +2,7 @@ import { randomBytes, randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { setTimeout as delay } from "node:timers/promises";
 import type { DatabaseSync } from "node:sqlite";
+import { fitsLens } from "../glasses/card-formatter.js";
 import { isQuestion, matchFact, valuesConflict } from "../nlp/matcher.js";
 import { sanitizeError } from "../redaction.js";
 import { openPinGuardDatabase, selectFacts, transaction, type ClusterRow, type DeliveryRow, type FactRow } from "./db.js";
@@ -61,6 +62,12 @@ function telegramErrorCode(error: unknown): number | undefined {
   if ("error_code" in error && typeof error.error_code === "number") return error.error_code;
   if ("status" in error && typeof error.status === "number") return error.status;
   return undefined;
+}
+
+function truncateCardSection(text: string, limit: number): string {
+  if (text.length <= limit) return text;
+  const prefix = text.slice(0, limit - 3).replace(/[\uD800-\uDBFF]$/u, "").trimEnd();
+  return `${prefix}...`;
 }
 
 async function withRateLimitRetry<T>(call: () => Promise<T>): Promise<T> {
@@ -159,7 +166,8 @@ export class PinGuardEngine {
     if (!valuesConflict(fact.text, fact.effective_at, text, msg.timestamp)) return false;
     this.db.prepare(`
       UPDATE facts SET lock_state = 'HOLD_CONFLICT', version = version + 1, confirmed = 0,
-        conflict_id = ?, conflict_text = ?, conflict_chat_id = ?, conflict_message_id = ?, conflict_timestamp = ?
+        conflict_id = ?, conflict_text = ?, conflict_chat_id = ?, conflict_message_id = ?, conflict_timestamp = ?,
+        conflict_card_sent = 0
       WHERE fact_key = ?
     `).run(randomBytes(12).toString("hex"), text, msg.chatId, msg.messageId, msg.timestamp, fact.fact_key);
     return true;
@@ -231,14 +239,27 @@ export class PinGuardEngine {
       if (row.lock_state !== "HOLD_CONFLICT" || !row.conflict_id) {
         throw new PinGuardError(409, "Conflict is not ready for escalation");
       }
-      this.db.prepare("UPDATE facts SET lock_state = 'AWAITING_CONFIRM', version = version + 1 WHERE fact_key = ?")
-        .run(factKey);
+      this.db.prepare(`
+        UPDATE facts SET lock_state = 'AWAITING_CONFIRM', version = version + 1, conflict_card_sent = 0
+        WHERE fact_key = ?
+      `).run(factKey);
       return row;
     });
     const version = fact.version + 1;
     const note = voiceNote?.trim();
-    const card = `PinGuard conflict for ${fact.fact_key}\n\nOriginal: ${this.safe(fact.text)}\n\nNew: ${this.safe(fact.conflict_text!)}` +
-      (note ? `\n\nInternal note: ${this.safe(note)}` : "");
+    const title = `PinGuard conflict for ${fact.fact_key}`;
+    const sections = [
+      { label: "\n\nOriginal: ", text: this.safe(fact.text) },
+      { label: "\n\nNew: ", text: this.safe(fact.conflict_text!) },
+    ];
+    if (note) sections.push({ label: "\n\nInternal note: ", text: this.safe(note) });
+    let remaining = 4_096 - title.length - sections.reduce((sum, { label }) => sum + label.length, 0);
+    // Short sections leave more room for longer ones without changing the display order.
+    sections.toSorted((left, right) => left.text.length - right.text.length).forEach((section, index) => {
+      section.text = truncateCardSection(section.text, Math.floor(remaining / (sections.length - index)));
+      remaining -= section.text.length;
+    });
+    const card = title + sections.map(({ label, text }) => label + text).join("");
     try {
       await withRateLimitRetry(async () => {
         this.checkVersion(this.fact(factKey), version);
@@ -249,6 +270,9 @@ export class PinGuardEngine {
           ]] },
         });
         this.checkSentMessage(this.options.opsChatId, sent);
+        this.db.prepare(`
+          UPDATE facts SET conflict_card_sent = 1 WHERE fact_key = ? AND version = ?
+        `).run(factKey, version);
       });
     } catch (error) {
       this.db.prepare(`
@@ -277,14 +301,14 @@ export class PinGuardEngine {
       }
       this.checkVersion(fact, expectedVersion);
       const revision = fact.revision + 1;
-      const effectiveAt = Math.max(this.now(), fact.effective_at, fact.conflict_timestamp);
+      const effectiveAt = Math.max(fact.effective_at, fact.conflict_timestamp);
       const text = choice === "confirm_new" ? fact.conflict_text : fact.text;
       this.db.prepare("INSERT INTO fact_revisions (fact_key, revision, text, effective_at) VALUES (?, ?, ?, ?)")
         .run(fact.fact_key, revision, text, effectiveAt);
       this.db.prepare(`
         UPDATE facts SET active_revision = ?, version = version + 1, lock_state = 'CLEAR', confirmed = 1,
           resolved_through_ts = ?, conflict_id = NULL, conflict_text = NULL, conflict_chat_id = NULL,
-          conflict_message_id = NULL, conflict_timestamp = NULL
+          conflict_message_id = NULL, conflict_timestamp = NULL, conflict_card_sent = 0
         WHERE fact_key = ?
       `).run(revision, effectiveAt, fact.fact_key);
     });
@@ -326,6 +350,7 @@ export class PinGuardEngine {
     const fact = this.fact(factKey);
     this.checkVersion(fact, expectedVersion);
     if (fact.lock_state !== "CLEAR") throw new PinGuardError(409, "Public delivery is locked");
+    if (!fitsLens(fact.text)) throw new PinGuardError(409, "Draft exceeds lens display budget; open companion phone view");
   }
 
   private checkSentMessage(chatId: string, message: Awaited<ReturnType<TelegramDeliveryPort["sendMessage"]>>): number {
@@ -394,6 +419,8 @@ export class PinGuardEngine {
         UPDATE deliveries SET status = CASE WHEN message_id IS NULL THEN 'SEND_UNKNOWN' ELSE 'PIN_FAILED' END,
           error = 'Process interrupted during delivery'
         WHERE status = 'SEND_IN_FLIGHT';
+        UPDATE facts SET lock_state = 'HOLD_CONFLICT', version = version + 1
+        WHERE lock_state = 'AWAITING_CONFIRM' AND conflict_card_sent = 0;
       `);
       const executing = this.db.prepare("SELECT cluster_id FROM clusters WHERE status = 'EXECUTING'")
         .all() as { cluster_id: string }[];

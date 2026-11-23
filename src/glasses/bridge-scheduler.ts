@@ -88,9 +88,10 @@ export class SerialBridgeScheduler {
     return this.enqueue(async () => {
       if (!this.bridge.audioControl || (open && !stillArmed())) return false;
       try {
-        return open
-          ? await this.bridge.audioControl(true, AudioInputSource.Glasses)
-          : await this.bridge.audioControl(false);
+        if (open) return await this.bridge.audioControl(true, AudioInputSource.Glasses);
+        // Keep both attempts in one queue slot so a retry can't close a newer capture.
+        const closed = await this.bridge.audioControl(false);
+        return closed === false ? await this.bridge.audioControl(false) : closed;
       } catch {
         return false;
       }

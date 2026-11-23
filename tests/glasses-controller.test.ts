@@ -109,6 +109,32 @@ describe("GlassesController through the SDK and backend boundaries", () => {
     expect(glasses.lens()).toBe(readyText);
   });
 
+  it("selects the first actionable card on refresh and when applying a snapshot", async () => {
+    const awaiting = active({ cluster_id: "awaiting", status: "AWAITING_CONFIRM", lock_state: "AWAITING_CONFIRM" });
+    const oversized = active({ cluster_id: "oversized", draft: "字".repeat(17) });
+    const ready = active();
+    const conflict = active({ cluster_id: "hold", fact_key: "capacity", status: "HOLD_CONFLICT",
+      lock_state: "HOLD_CONFLICT", version: 8, draft: oversized.draft });
+    const glasses = fixture(snapshot(awaiting, ready, conflict));
+    await glasses.start();
+    expect(glasses.lens()).toBe(readyText);
+    glasses.emit(tap);
+    glasses.emit(up);
+    await advance();
+    expect(glasses.api.executeCluster).toHaveBeenCalledWith(payload);
+
+    await glasses.push(oversized, conflict, ready);
+    expect(glasses.lens()).toBe("CONFLICT HOLD\nTAP: PREP OPS CARD");
+    glasses.emit(tap);
+    glasses.emit(up);
+    await advance();
+    expect(glasses.api.escalateConflict).toHaveBeenCalledWith({ factKey: "capacity", expectedVersion: 8 });
+
+    await glasses.push(awaiting, oversized);
+    expect(glasses.lens()).toBe("CONFLICT HOLD\nAWAITING OPS CONFIRM");
+    glasses.controller.destroy();
+  });
+
   it("only executes after tap then swipe, posts the version shown, and clears the completed card", async () => {
     const glasses = fixture();
     await glasses.start();

@@ -26,7 +26,7 @@ function parseAdminUserIds(raw: string | undefined): string[] {
   return ids;
 }
 
-async function main(): Promise<void> {
+export async function main(): Promise<void> {
   loadOptionalEnv();
   const config = loadConfig(process.env);
   const adminUserIds = parseAdminUserIds(process.env.ADMIN_USER_IDS);
@@ -67,38 +67,16 @@ async function main(): Promise<void> {
   }));
 
   const abortController = new AbortController();
-  const shutdown = (): void => {
-    abortController.abort();
-    server.close();
-  };
+  const shutdown = (): void => abortController.abort();
   process.once("SIGINT", shutdown);
   process.once("SIGTERM", shutdown);
 
-  // Skip pre-existing stale updates on fresh start unless caller opts in.
   let offset: number | undefined;
-  try {
-    const initial = await transport.getUpdates({
-      timeout: 0,
-      limit: 100,
-      allowed_updates: ["message", "channel_post", "callback_query"],
-    }, abortController.signal);
-    if (initial.length > 0) offset = initial[initial.length - 1].update_id + 1;
-  } catch (error) {
-    if (isPollingConflict(error)) {
-      console.error("409 Conflict: stop any other bot poller and remove any webhook before starting PinGuard");
-      shutdown();
-      engine.close();
-      process.exitCode = 1;
-      return;
-    }
-    throw error;
-  }
-
   try {
     while (!abortController.signal.aborted) {
       try {
         const updates = await transport.getUpdates({
-          timeout: 15,
+          timeout: 10,
           offset,
           allowed_updates: ["message", "channel_post", "callback_query"],
         }, abortController.signal);
@@ -142,13 +120,17 @@ async function main(): Promise<void> {
       }
     }
   } finally {
-    server.close();
+    await new Promise<void>((resolveClose) => server.close(() => resolveClose()));
     engine.close();
+    process.off("SIGINT", shutdown);
+    process.off("SIGTERM", shutdown);
   }
 }
 
-main().catch((error: unknown) => {
-  const secrets = [process.env.TELEGRAM_BOT_TOKEN?.trim() ?? "", process.env.GROQ_API_KEY?.trim() ?? ""];
-  console.error(sanitizeError(error, secrets));
-  process.exitCode = 1;
-});
+if (import.meta.main ?? (process.argv[1] && import.meta.filename === resolve(process.argv[1]))) {
+  main().catch((error: unknown) => {
+    const secrets = [process.env.TELEGRAM_BOT_TOKEN?.trim() ?? "", process.env.GROQ_API_KEY?.trim() ?? ""];
+    console.error(sanitizeError(error, secrets));
+    process.exitCode = 1;
+  });
+}

@@ -1,4 +1,4 @@
-import { readFile } from "node:fs/promises";
+import { readFile, realpath } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { extname, resolve, sep } from "node:path";
 import type { PinGuardEngine } from "../engine/pinguard-engine.js";
@@ -119,7 +119,9 @@ export function createPinGuardServer(
     const target = resolve(resolvedStaticDir, rel);
     if (target !== resolvedStaticDir && !target.startsWith(`${resolvedStaticDir}${sep}`)) return false;
     try {
-      const body = await readFile(target);
+      const [realRoot, realTarget] = await Promise.all([realpath(resolvedStaticDir), realpath(target)]);
+      if (realTarget !== realRoot && !realTarget.startsWith(`${realRoot}${sep}`)) return false;
+      const body = await readFile(realTarget);
       const mime = STATIC_MIME[extname(target)] ?? "application/octet-stream";
       res.writeHead(200, { "content-type": mime, "cache-control": "no-store", "x-content-type-options": "nosniff" });
       res.end(body);

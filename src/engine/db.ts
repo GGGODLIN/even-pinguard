@@ -49,7 +49,8 @@ export function openPinGuardDatabase(path: string): DatabaseSync {
         conflict_text TEXT,
         conflict_chat_id TEXT,
         conflict_message_id INTEGER,
-        conflict_timestamp INTEGER
+        conflict_timestamp INTEGER,
+        conflict_card_sent INTEGER NOT NULL DEFAULT 0
       ) STRICT;
       CREATE TABLE IF NOT EXISTS fact_revisions (
         fact_key TEXT NOT NULL REFERENCES facts(fact_key),
@@ -75,6 +76,11 @@ export function openPinGuardDatabase(path: string): DatabaseSync {
         PRIMARY KEY (action_id, chat_id)
       ) STRICT;
     `);
+    transaction(db, () => {
+      if (!db.prepare("SELECT 1 FROM pragma_table_info('facts') WHERE name = 'conflict_card_sent'").get()) {
+        db.exec("ALTER TABLE facts ADD COLUMN conflict_card_sent INTEGER NOT NULL DEFAULT 0");
+      }
+    });
     return db;
   } catch (error) {
     db.close();

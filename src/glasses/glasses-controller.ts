@@ -2,7 +2,7 @@ import { AudioInputSource, DeviceConnectType, type EvenAppBridge, type EvenHubEv
 import type { ClusterState, StateSnapshot } from "../engine/types.js";
 import { encodePcm16ToWav, maxVoiceMs, maxVoicePcmBytes } from "../voice/wav.js";
 import { SerialBridgeScheduler } from "./bridge-scheduler.js";
-import { formatCard, idleText } from "./card-formatter.js";
+import { fitsLens, formatCard, idleText } from "./card-formatter.js";
 import { parseEvenHubEvent } from "./event-parser.js";
 
 export type EvenGlassesBridge = Pick<EvenAppBridge,
@@ -30,6 +30,11 @@ function sameCard(a: ClusterState | undefined, b: ClusterState | undefined): boo
     a.status === b.status && a.lock_state === b.lock_state && a.draft === b.draft && a.confirmed === b.confirmed;
 }
 
+function selectCluster({ clusters }: StateSnapshot): ClusterState | undefined {
+  return clusters.find((cluster) => (cluster.status === "READY" && fitsLens(cluster.draft)) ||
+    cluster.status === "HOLD_CONFLICT") ?? clusters[0];
+}
+
 export class GlassesController {
   private readonly scheduler: SerialBridgeScheduler;
   private readonly unsubscribe: (() => void)[] = [];
@@ -48,7 +53,7 @@ export class GlassesController {
   constructor(
     private readonly bridge: EvenGlassesBridge,
     private readonly api: PinGuardApiClient,
-    private readonly options: { debounceMs?: number; pollIntervalMs?: number } = {},
+    private readonly options: { debounceMs?: number; pollIntervalMs?: number; onError?: (error: Error) => void } = {},
   ) {
     this.scheduler = new SerialBridgeScheduler(bridge, options.debounceMs);
   }
@@ -76,7 +81,7 @@ export class GlassesController {
 
   applyState(snapshot: StateSnapshot): Promise<void> {
     this.activeRead = undefined;
-    return this.updateCard(snapshot.clusters[0]);
+    return this.updateCard(selectCluster(snapshot));
   }
 
   handleDisconnect(): Promise<void> {
@@ -103,7 +108,7 @@ export class GlassesController {
     this.activeRead = id;
     try {
       const snapshot = await this.api.getState();
-      if (this.activeRead === id) await this.updateCard(snapshot.clusters[0]);
+      if (this.activeRead === id) await this.updateCard(selectCluster(snapshot));
     } catch (error) {
       if (this.activeRead === id) {
         await this.updateCard();
@@ -140,7 +145,10 @@ export class GlassesController {
   private stopVoice(voice: VoiceCapture): void {
     voice.recording = false;
     clearTimeout(voice.timer);
-    voice.closed ??= this.scheduler.setAudio(false);
+    voice.closed ??= this.scheduler.setAudio(false).then((closed) => {
+      if (!closed) (this.options.onError ?? console.error)(new Error("Failed to close glasses microphone"));
+      return closed;
+    });
   }
 
   private async startVoice(): Promise<void> {

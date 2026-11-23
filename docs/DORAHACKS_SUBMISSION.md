@@ -32,7 +32,7 @@ Organizers running multiple Telegram groups during launches or Demo Days face tw
 
 ## Live End-to-End Evidence (2026-11-23)
 
-- **Automated & Blind Contract Verification**: `72/72` Vitest tests passing (`tsc --noEmit` 0 errors, `vite build` clean, `evenhub pack` 38,224-byte `.ehpk` with 0 warnings) + `78/78` independent black-box blind verification scenarios across Seam 1 (17/17 + 40-step patrol), Seam 2 (36/36 + 43-step patrol), and Voice/Companion (25/25), 0 counterexamples.
+- **Automated & Blind Contract Verification**: `83/83` Vitest tests passing (`tsc --noEmit` 0 errors, `vite build` clean, `evenhub pack` 38,224-byte `.ehpk` with 0 warnings) + `78/78` independent black-box blind verification scenarios across Seam 1 (17/17 + 40-step patrol), Seam 2 (36/36 + 43-step patrol), and Voice/Companion (25/25), 0 counterexamples.
 - **Live Telegram + Even Hub Simulator 0.9.5 Receipts**:
   - Preflight verified `@pinguard_g2_demo_bot` (`can_pin_messages: true`) across Community A (`-1004343200115`), Community B (`-1004463230101`), and Ops (`-1003924897141`).
   - Cross-group questions triggered `READY` on the G2 lens; conflicting admin update locked into `HOLD_CONFLICT` (`HTTP 409` on execute); real simulator `click -> up` escalated Ops Inline Keyboard card (with live Groq STT note); clicking `Confirm New` unlocked `READY [CONFIRMED]` (v4); real simulator `click -> up` delivered & silently pinned `message_id: 5` (`-1004343200115`) and `message_id: 3` (`-1004463230101`), clearing the lens to idle.

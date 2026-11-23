@@ -1,11 +1,14 @@
 import { once } from "node:events";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { PinGuardEngine } from "../src/engine/pinguard-engine.js";
 import type { IncomingTelegramMessage, TelegramDeliveryPort } from "../src/engine/types.js";
 import { createPinGuardServer } from "../src/server/http-server.js";
+import { main } from "../src/server/main.js";
 
 const alpha = "-100101";
 const beta = "-100102";
@@ -83,6 +86,146 @@ function conflict(engine: PinGuardEngine, overrides: Partial<IncomingTelegramMes
 function countPublicSends(telegram: Awaited<ReturnType<typeof fixture>>["telegram"]): number {
   return telegram.sendMessage.mock.calls.filter(([chat]) => chat !== ops).length;
 }
+
+it("processes queued updates with poll headroom and drains an in-flight execute on a polling conflict", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "pinguard-main-"));
+  cleanups.push(() => rm(dir, { recursive: true, force: true }));
+  const seedPath = join(dir, "facts.json");
+  const dbPath = join(dir, "main.sqlite");
+  const sendOpsCard = vi.fn<TelegramDeliveryPort["sendMessage"]>(async (chatId) => ({ chat: { id: chatId }, message_id: 41 }));
+  const beforeRestart = new PinGuardEngine({
+    dbPath, communityChatIds: [alpha, beta], opsChatId: ops, announceChatId: announce, adminUserIds: [admin],
+    telegram: { sendMessage: sendOpsCard, pinChatMessage: async () => true },
+  });
+  try {
+    beforeRestart.seedFacts({ factKey: "capacity", text: "Room A has 80 seats.", effectiveAt: seedTime });
+    conflict(beforeRestart, { text: "Room A has 100 seats." });
+    await beforeRestart.escalateConflict({ factKey: "capacity", expectedVersion: 2 });
+  } finally {
+    beforeRestart.close();
+  }
+  const callbackData = sendOpsCard.mock.calls[0][2]!.reply_markup.inline_keyboard[0][0].callback_data;
+  await writeFile(seedPath, JSON.stringify(seed));
+  const portProbe = createServer();
+  portProbe.listen(0, "127.0.0.1");
+  await once(portProbe, "listening");
+  const address = portProbe.address();
+  if (!address || typeof address === "string") throw new Error("Expected TCP address");
+  await new Promise<void>((resolve) => portProbe.close(() => resolve()));
+  const base = `http://127.0.0.1:${address.port}`;
+  const localFetch = globalThis.fetch;
+  const exitCode = process.exitCode;
+  const signals = ["SIGINT", "SIGTERM"] as const;
+  const listenerCounts = signals.map((signal) => process.listenerCount(signal));
+  const pollStarted = Promise.withResolvers<void>();
+  const stopPolling = Promise.withResolvers<void>();
+  const shutdownStarted = Promise.withResolvers<void>();
+  const sendStarted = Promise.withResolvers<void>();
+  const releaseSend = Promise.withResolvers<void>();
+  const polls: unknown[] = [];
+  const answered: string[] = [];
+  const pending = [
+    { update_id: 101, callback_query: { id: "queued-confirm", from: { id: Number(admin) }, data: callbackData,
+      message: { chat: { id: Number(ops) }, message_id: 41 } } },
+    ...[alpha, beta].map((chatId, index) => ({ update_id: 102 + index, message: {
+      chat: { id: Number(chatId) }, message_id: 1, from: { id: Number(guest) },
+      date: conflictTime, text: "When does registration close?",
+    } })),
+    { update_id: 104, message: { chat: { id: Number(ops) }, message_id: 2, from: { id: Number(admin) },
+      date: conflictTime + 2, text: "Room A now has 120 seats." } },
+  ];
+  const log = vi.spyOn(console, "log").mockImplementation(() => {});
+  const logError = vi.spyOn(console, "error").mockImplementation((message: unknown) => {
+    if (typeof message === "string" && message.startsWith("409 Conflict:")) shutdownStarted.resolve();
+  });
+  for (const [key, value] of Object.entries({
+    TELEGRAM_BOT_TOKEN: token, ADMIN_USER_IDS: admin, COMMUNITY_CHAT_IDS: `${alpha},${beta}`,
+    OPS_CHAT_ID: ops, ANNOUNCE_CHAT_ID: announce, PINGUARD_DB_PATH: dbPath, PINGUARD_SEED_FILE: seedPath,
+    PORT: String(address.port),
+  })) vi.stubEnv(key, value);
+  vi.stubGlobal("fetch", async (url: string | URL, request: RequestInit) => {
+    const method = new URL(url).pathname.split("/").at(-1);
+    const payload = JSON.parse(String(request.body ?? "{}"));
+    const success = (result: unknown) => Response.json({ ok: true, result });
+    switch (method) {
+      case "getMe": return success({ id: 90210, username: "pinguard_fixture" });
+      case "getChatMember": return success({ status: "administrator", can_pin_messages: true });
+      case "answerCallbackQuery":
+        answered.push(payload.callback_query_id);
+        return success(true);
+      case "getUpdates":
+        polls.push(payload);
+        if (polls.length <= 2) return success(pending);
+        pollStarted.resolve();
+        await stopPolling.promise;
+        return new Response(null, { status: 409 });
+      case "sendMessage":
+        sendStarted.resolve();
+        await releaseSend.promise;
+        return success({ chat: { id: Number(payload.chat_id) }, message_id: 41 });
+      case "pinChatMessage": return success(true);
+      default: throw new Error(`Unexpected Telegram method: ${method}`);
+    }
+  });
+
+  const running = main();
+  try {
+    await Promise.race([pollStarted.promise, running.then(() => { throw new Error("Polling exited before the test batch"); })]);
+    const state = await (await localFetch(`${base}/api/state`)).json();
+    expect(state.facts).toContainEqual(expect.objectContaining({
+      fact_key: "capacity", text: "Room A has 100 seats.", lock_state: "HOLD_CONFLICT",
+      conflict: expect.objectContaining({ text: "Room A now has 120 seats." }),
+    }));
+    expect(answered).toEqual(["queued-confirm"]);
+    const [cluster] = state.clusters;
+    expect(cluster).toMatchObject({ fact_key: "registration", status: "READY", draft });
+    expect(polls).toEqual([
+      { timeout: 0, limit: 1 },
+      { timeout: 10, allowed_updates: ["message", "channel_post", "callback_query"] },
+      { timeout: 10, offset: 105, allowed_updates: ["message", "channel_post", "callback_query"] },
+    ]);
+
+    const execution = localFetch(`${base}/api/actions/execute`, {
+      method: "POST", headers: { "content-type": "application/json", connection: "close" },
+      body: JSON.stringify({ clusterId: cluster.cluster_id, expectedVersion: cluster.version }),
+    });
+    await Promise.race([sendStarted.promise, execution.then(() => { throw new Error("Execute returned before attempting delivery"); })]);
+    stopPolling.resolve();
+    await shutdownStarted.promise;
+    releaseSend.resolve();
+    const response = await execution;
+    expect(response.status).toBe(200);
+    const result = await response.json();
+    expect(result.receipts).toMatchObject([
+      { chat_id: alpha, message_id: 41, status: "PINNED" },
+      { chat_id: beta, message_id: 41, status: "PINNED" },
+    ]);
+    await running;
+    expect(process.exitCode).toBe(1);
+    expect(signals.map((signal) => process.listenerCount(signal))).toEqual(listenerCounts);
+    await expect(localFetch(`${base}/api/state`)).rejects.toThrow("fetch failed");
+    const db = new DatabaseSync(dbPath, { readOnly: true });
+    try {
+      expect(db.prepare("SELECT chat_id, message_id, status FROM deliveries ORDER BY rowid").all()).toEqual([
+        { chat_id: alpha, message_id: 41, status: "PINNED" }, { chat_id: beta, message_id: 41, status: "PINNED" },
+      ]);
+    } finally {
+      db.close();
+    }
+  } finally {
+    stopPolling.resolve();
+    releaseSend.resolve();
+    try {
+      await running;
+    } finally {
+      process.exitCode = exitCode;
+      vi.unstubAllGlobals();
+      vi.unstubAllEnvs();
+      log.mockRestore();
+      logError.mockRestore();
+    }
+  }
+});
 
 describe("FAQ seeding and clustering", () => {
   it("waits for three separate matching questions in one group", async () => {
@@ -203,9 +346,10 @@ describe("versioned conflict lock", () => {
     expect(() => engine.handleCallbackQuery({ ...confirm, data })).toThrow("no longer awaiting confirmation");
 
     conflict(engine, { messageId: 9 });
-    conflict(engine, { messageId: 10, timestamp: now });
+    conflict(engine, { messageId: 10, timestamp: conflictTime - 1 });
+    conflict(engine, { messageId: 11, timestamp: conflictTime });
     expect(engine.getState()).toMatchObject({
-      facts: [{ fact_key: "registration", text: expectedText, revision: 2, effective_at: now, version: 4,
+      facts: [{ fact_key: "registration", text: expectedText, revision: 2, effective_at: conflictTime, version: 4,
         lock_state: "CLEAR", confirmed: true, conflict: null }],
       clusters: [{ cluster_id: action.clusterId, status: "READY", draft: expectedText, version: 4, confirmed: true }],
     });
@@ -215,6 +359,53 @@ describe("versioned conflict lock", () => {
     expect(executed.status).toBe(200);
     expect(telegram.sendMessage.mock.calls.slice(1)).toEqual([[alpha, expectedText], [beta, expectedText]]);
     expect(engine.getState().clusters).toEqual([]);
+  });
+
+  it("detects a newer admin update received in the same delayed batch as confirmation", async () => {
+    const { engine, telegram } = await fixture();
+    ready(engine);
+    conflict(engine);
+    await engine.escalateConflict({ factKey: "registration", expectedVersion: 2 });
+    const data = telegram.sendMessage.mock.calls[0][2]!.reply_markup.inline_keyboard[0][0].callback_data;
+    engine.handleCallbackQuery({ chatId: ops, fromUserId: admin, data });
+    const newer = "Registration deadline is now December 9, 2026 at 17:00.";
+    conflict(engine, { messageId: 2, timestamp: conflictTime + 2, text: newer });
+    expect(engine.getState().facts[0]).toMatchObject({
+      text: update, effective_at: conflictTime, revision: 2, lock_state: "HOLD_CONFLICT", version: 5,
+      conflict: { text: newer, timestamp: conflictTime + 2 },
+    });
+  });
+
+  it("detects room capacity swaps even when all of the numbers still match", async () => {
+    const { engine } = await fixture();
+    const original = "Room A 80 seats, Room B 120 seats";
+    const swapped = "Room A 120 seats, Room B 80 seats";
+    engine.seedFacts({ factKey: "capacity", text: original, effectiveAt: seedTime });
+    conflict(engine, { text: original });
+    expect(engine.getState().facts[0]).toMatchObject({ text: original, lock_state: "CLEAR", version: 1 });
+    conflict(engine, { messageId: 2, text: swapped });
+    expect(engine.getState().facts[0]).toMatchObject({
+      text: original, lock_state: "HOLD_CONFLICT", version: 2, conflict: { text: swapped },
+    });
+  });
+
+  it("trims every long ops card section within Telegram's 4096-character limit", async () => {
+    const { engine, telegram } = await fixture();
+    const original = `${draft} ${"🟩".repeat(2_100)}`;
+    const proposed = `${update} ${"🟦".repeat(2_100)}`;
+    const voiceNote = `Context ${"🟨".repeat(2_100)}`;
+    engine.seedFacts({ ...seed, text: original });
+    conflict(engine, { text: proposed });
+    await engine.escalateConflict({ factKey: "registration", expectedVersion: 2, voiceNote });
+    const [chatId, card, keyboard] = telegram.sendMessage.mock.calls[0];
+    expect(chatId).toBe(ops);
+    expect(card.length).toBeLessThanOrEqual(4_096);
+    expect(card.isWellFormed()).toBe(true);
+    const [, originalSection, newSection, noteSection] = card.split("\n\n");
+    expect(originalSection).toMatch(/^Original: Registration .*🟩\.\.\.$/u);
+    expect(newSection).toMatch(/^New: Registration .*🟦\.\.\.$/u);
+    expect(noteSection).toMatch(/^Internal note: Context .*🟨\.\.\.$/u);
+    expect(keyboard?.reply_markup.inline_keyboard[0].map(({ text }) => text)).toEqual(["Confirm New", "Keep Original"]);
   });
 
   it("normalizes currency and detects a newer numeric conflict", async () => {
@@ -248,6 +439,20 @@ describe("versioned conflict lock", () => {
 });
 
 describe("bounded per-group delivery", () => {
+  it("rejects a READY draft that leaves no room for the lens action cue", async () => {
+    const { engine, post, telegram } = await fixture();
+    const oversized = "Line one\nLine two\nLine three\nLine four\nLine five\nLine six\nLine seven\nLine eight";
+    engine.seedFacts({ ...seed, text: oversized });
+    for (const chatId of [alpha, beta]) ingest(engine, { chatId, text: "When does registration close?" });
+    const [cluster] = engine.getState().clusters;
+    expect(cluster).toMatchObject({ status: "READY", draft: oversized });
+    const response = await post("/api/actions/execute", { clusterId: cluster.cluster_id, expectedVersion: cluster.version });
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({ error: "Draft exceeds lens display budget; open companion phone view" });
+    expect(engine.getReceipts(cluster.cluster_id)).toEqual([]);
+    expect(telegram.sendMessage).not.toHaveBeenCalled();
+  });
+
   it("persists exact outcomes and never repeats an ambiguous send after restart", async () => {
     const { engine, telegram, post, get, restart } = await fixture();
     const action = ready(engine, [alpha, beta, gamma, delta], 3);
@@ -381,6 +586,54 @@ describe("bounded per-group delivery", () => {
 });
 
 describe("interrupted delivery", () => {
+  it("reopens an unsent ops escalation after restart and preserves a sent card on the next restart", async () => {
+    const { engine, telegram, restart } = await fixture();
+    ready(engine);
+    conflict(engine);
+    telegram.sendMessage.mockReturnValueOnce(new Promise(() => {}));
+    void engine.escalateConflict({ factKey: "registration", expectedVersion: 2 });
+    const interruptedButton = telegram.sendMessage.mock.calls[0][2]!.reply_markup.inline_keyboard[0][0];
+    expect(engine.getState().facts[0]).toMatchObject({ lock_state: "AWAITING_CONFIRM", version: 3 });
+
+    const reopened = restart();
+    reopened.recoverInterruptedDeliveries();
+    expect(reopened.getState().facts[0]).toMatchObject({ lock_state: "HOLD_CONFLICT", version: 4, conflict: { text: update } });
+    expect(() => reopened.handleCallbackQuery({ chatId: ops, fromUserId: admin, data: interruptedButton.callback_data }))
+      .toThrow("no longer awaiting confirmation");
+    await reopened.escalateConflict({ factKey: "registration", expectedVersion: 4 });
+
+    const reopenedAgain = restart();
+    reopenedAgain.recoverInterruptedDeliveries();
+    expect(reopenedAgain.getState().facts[0]).toMatchObject({ lock_state: "AWAITING_CONFIRM", version: 5 });
+    const sentButton = telegram.sendMessage.mock.calls[1][2]!.reply_markup.inline_keyboard[0][0];
+    reopenedAgain.handleCallbackQuery({ chatId: ops, fromUserId: admin, data: sentButton.callback_data });
+    expect(reopenedAgain.getState().facts[0]).toMatchObject({ lock_state: "CLEAR", version: 6, text: update });
+  });
+
+  it("migrates databases created before ops card delivery was tracked", async () => {
+    const { dir, engine, telegram, restart } = await fixture();
+    ready(engine);
+    conflict(engine);
+    await engine.escalateConflict({ factKey: "registration", expectedVersion: 2 });
+    const legacy = new DatabaseSync(join(dir, "test.sqlite"));
+    try {
+      if (legacy.prepare("SELECT 1 FROM pragma_table_info('facts') WHERE name = 'conflict_card_sent'").get()) {
+        legacy.exec("ALTER TABLE facts DROP COLUMN conflict_card_sent");
+      }
+    } finally {
+      legacy.close();
+    }
+
+    const reopened = restart();
+    reopened.recoverInterruptedDeliveries();
+    expect(reopened.getState().facts[0]).toMatchObject({ text: draft, lock_state: "HOLD_CONFLICT", version: 4 });
+    await reopened.escalateConflict({ factKey: "registration", expectedVersion: 4 });
+    const reopenedAgain = restart();
+    reopenedAgain.recoverInterruptedDeliveries();
+    expect(reopenedAgain.getState().facts[0]).toMatchObject({ lock_state: "AWAITING_CONFIRM", version: 5 });
+    expect(telegram.sendMessage.mock.calls.map(([chatId]) => chatId)).toEqual([ops, ops]);
+  });
+
   it("recovers an in-flight send as unknown and only dispatches previously unsent groups", async () => {
     const { engine, telegram, restart } = await fixture();
     const action = ready(engine);

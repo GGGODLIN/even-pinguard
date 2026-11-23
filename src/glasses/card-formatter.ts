@@ -8,8 +8,10 @@ const longDraftText = "LONG DRAFT -> OPEN PHONE";
 const maxColumns = 32;
 const maxRows = 8;
 
-function fitsLens(text: string): boolean {
-  let rows = 0;
+export function fitsLens(text: string): boolean {
+  if (!text.trim()) return false;
+  // READY and SEND cues, including the confirmation badge, occupy one row.
+  let rows = 1;
   for (const line of text.split("\n")) {
     if (/[\p{C}\p{Zl}\p{Zp}]/u.test(line)) return false;
     rows++;
@@ -42,6 +44,7 @@ export function formatCard(cluster?: ClusterState, armed = false): { text: strin
 
   const cue = armed ? "SWIPE UP: SEND + PIN" : "READY: TAP TO ARM";
   const badge = cluster.confirmed ? " [CONFIRMED]" : "";
-  const text = `${cue}${badge}\n${cluster.draft}`;
-  return cluster.draft.trim() && fitsLens(text) ? { text, oversized: false } : { text: longDraftText, oversized: true };
+  return fitsLens(cluster.draft)
+    ? { text: `${cue}${badge}\n${cluster.draft}`, oversized: false }
+    : { text: longDraftText, oversized: true };
 }
