@@ -33,7 +33,7 @@ Organizers running multiple Telegram groups during launches or Demo Days face tw
 
 ## Bounded Matching & Conflict Rule Set
 
-- **Question matching:** `minisearch` BM25+ matches against canonical facts seeded from [faq-seed.json](/faq-seed.json) and their example questions, using ASCII lowercasing and CJK 2-gram tokenization. Non-text Telegram updates (`!msg.text`) are ignored by message matching.
+- **Question matching:** `minisearch` BM25+ matches against canonical facts seeded from [faq-seed.json](https://github.com/GGGODLIN/even-pinguard/blob/main/faq-seed.json) and their example questions, using ASCII lowercasing and CJK 2-gram tokenization. Non-text Telegram updates (`!msg.text`) are ignored by message matching.
 - **Date conflicts:** `chrono-node` uses the English and Chinese (EN + ZH) casual parsers and compares explicit `year`, `month`, `day`, and `weekday` components. A same-day, time-only edit with no date or numeric unit change does not trigger a date conflict in v1.
 - **Numeric conflicts:** The comparator handles integers and decimals with units including `%`, USD (`$`, `US$`, `USD`), TWD (`NT$`, `TWD`, `元`), and capacity (`seat(s)`, `spot(s)`, `place(s)`, `人`, `位`). It also detects positional swaps within a unit, such as `Room A 80 seats, Room B 120 seats` becoming `Room A 120 seats, Room B 80 seats`.
 
