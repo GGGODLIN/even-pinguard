@@ -2,6 +2,9 @@
 
 **Track 01 (Messaging & News) · Best Telegram Integration** — *Heads Up: Even Realities Hackathon*
 
+- **Demo Video (48.6 s, 1080p30)**: [Watch on YouTube](https://youtu.be/uvEBFYPUSIQ)
+- **Packaged Even Hub Build (`.ehpk`)**: [Download `pinguard-v0.1.0.ehpk`](https://github.com/GGGODLIN/even-pinguard/releases/tag/v0.1.0)
+
 Community organizers running multiple Telegram groups during launches, hackathons, or Demo Days face two failures with raw notification feeds on smart glasses: high-volume chatter buries repeated questions, and answering from memory can contradict a newer admin update in an ops chat—broadcasting and pinning stale times or rooms across every community group.
 
 **PinGuard** is a single-process Even Hub TypeScript web app + Node.js/SQLite backend built for Even G2 glasses (`@evenrealities/even_hub_sdk@0.0.16`). Instead of dumping raw unread messages onto the monochrome lens, it clusters repeated questions locally, cross-checks canonical seeded facts against recent admin updates, hard-locks public sends on conflict, and requires an orthogonal two-step glasses gesture (`TAP` to arm → `SWIPE UP` to execute) to post and silently pin verified announcements across affected Telegram groups.

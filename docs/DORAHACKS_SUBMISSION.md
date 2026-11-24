@@ -4,7 +4,8 @@
 - **Track**: Track 01 — Messaging & News (+ Best Telegram Integration)
 - **Repository**: https://github.com/GGGODLIN/even-pinguard
 - **License**: MIT
-- **Demo Video**: *(Pending recording / upload — target <=60s showing Even Hub Simulator 0.9.5 + real Telegram writes)*
+- **Demo Video**: https://youtu.be/uvEBFYPUSIQ *(48.6 s, 1080p30 — Even Hub Simulator 0.9.5 + real Telegram writes)*
+- **Packaged `.ehpk` Build**: https://github.com/GGGODLIN/even-pinguard/releases/tag/v0.1.0
 
 ---
 
